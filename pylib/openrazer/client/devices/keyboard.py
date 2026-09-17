@@ -10,6 +10,86 @@ from openrazer.client.devices import RazerDevice as __RazerDevice, BaseDeviceFac
 
 class RazerKeyboard(__RazerDevice):
     @property
+    def fan_state(self) -> list[tuple[int, int, str, int]]:
+        """Return each fan's ID, performance mode, auto/manual mode and target RPM.
+
+        Automatic mode reports target RPM as zero; read fan_rpm for current speed.
+        """
+        if self.has('fan_control'):
+            return [(int(fan_id), int(performance), str(mode), int(rpm))
+                    for fan_id, performance, mode, rpm in self._dbus_interfaces['fan'].getFanState()]
+        else:
+            raise NotImplementedError()
+
+    @property
+    def fan_rpm(self) -> dict[int, int]:
+        """Return firmware-reported current RPM by fan ID."""
+        if self.has('fan_control'):
+            return {int(fan_id): int(rpm) for fan_id, rpm in self._dbus_interfaces['fan'].getFanRPM().items()}
+        else:
+            raise NotImplementedError()
+
+    @property
+    def fan_limits(self) -> tuple[int, int, int]:
+        """Return minimum, default and maximum RPM for the current performance mode."""
+        if self.has('fan_control'):
+            minimum, default, maximum = self._dbus_interfaces['fan'].getFanLimits()
+            return int(minimum), int(default), int(maximum)
+        else:
+            raise NotImplementedError()
+
+    @property
+    def fan_config(self) -> dict[str, tuple[int, ...]]:
+        """Return registered automatic/manual performance modes and monitored fan IDs."""
+        if self.has('fan_control'):
+            automatic, manual, monitored = self._dbus_interfaces['fan'].getFanConfig()
+            masks = (automatic, manual, monitored)
+            if any(isinstance(mask, bool) or not isinstance(mask, int) or not 0 <= mask <= 0xFFFFFFFF for mask in masks):
+                raise ValueError('Invalid fan configuration mask')
+            return {name: tuple(bit for bit in range(32) if int(mask) & (1 << bit))
+                    for name, mask in zip(('automatic_modes', 'manual_modes', 'monitored_fans'), masks)}
+        else:
+            raise NotImplementedError()
+
+    @property
+    def fan_status(self) -> tuple[str, int, dict[int, int], str]:
+        """Return cached phase, requested RPM, last measured RPM and detail.
+
+        Phases include idle, auto, suspended, settling, reached, timeout, error
+        and cancelled. The requested RPM may remain while battery power forces
+        automatic control. Timeout does not establish a stalled fan.
+        """
+        if self.has('fan_control'):
+            phase, target, current, reason = self._dbus_interfaces['fan'].getFanStatus()
+            return str(phase), int(target), {int(fan_id): int(rpm) for fan_id, rpm in current.items()}, str(reason)
+        else:
+            raise NotImplementedError()
+
+    def set_fan_auto(self) -> None:
+        """Restore firmware-controlled fan speed, preserving the performance mode."""
+        if self.has('fan_control'):
+            self._dbus_interfaces['fan'].setFanAuto()
+        else:
+            raise NotImplementedError()
+
+    def set_fan_manual(self, rpm: int) -> None:
+        """Set all fans to a fixed RPM in steps of 100, subject to device limits.
+
+        Requires AC power and a current performance mode listed in fan_config's
+        manual_modes. The performance mode is preserved and firmware RPM limits
+        are checked for every request. Returning confirms acceptance; fan_status
+        separately reports whether the monitored fans reached the requested RPM.
+        """
+        if self.has('fan_control'):
+            if isinstance(rpm, bool) or not isinstance(rpm, int):
+                raise ValueError('RPM must be an integer')
+            if rpm <= 0 or rpm > 25500 or rpm % 100:
+                raise ValueError('RPM must be between 100 and 25500 in steps of 100')
+            self._dbus_interfaces['fan'].setFanManual(rpm)
+        else:
+            raise NotImplementedError()
+
+    @property
     def game_mode_led(self) -> bool:
         """
         Get game mode LED state
