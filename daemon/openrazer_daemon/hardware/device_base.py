@@ -17,6 +17,7 @@ from openrazer_daemon.dbus_services.service import DBusService
 import openrazer_daemon.dbus_services.dbus_methods
 from openrazer_daemon.misc import effect_sync
 from openrazer_daemon.misc.battery_notifier import BatteryManager as _BatteryManager
+from openrazer_daemon.misc.fan_control import FanControl as _FanControl
 
 
 # pylint: disable=too-many-instance-attributes
@@ -70,6 +71,7 @@ class RazerDevice(DBusService):
         if additional_interfaces is not None:
             self.additional_interfaces.extend(additional_interfaces)
         self._battery_manager = None
+        self._fan_control = None
 
         self.config = config
         self.persistence = persistence
@@ -137,7 +139,8 @@ class RazerDevice(DBusService):
                     self.event_files.append(os.path.join(search_dir, event_file))
 
         object_path = os.path.join(self.OBJECT_PATH, self.serial)
-        super().__init__(object_path)
+        isolate_methods = any(getattr(getattr(openrazer_daemon.dbus_services.dbus_methods, name, None), 'required_files', ()) for name in self.methods_internal + self.METHODS)
+        super().__init__(object_path, isolate_methods=isolate_methods)
 
         # Set up methods to suspend and restore device operation
         self.suspend_args = {}
@@ -250,6 +253,8 @@ class RazerDevice(DBusService):
 
         # Load additional DBus methods
         self.load_methods()
+        if hasattr(self, 'setFanManual') and hasattr(self, 'getFanConfig'):
+            self._fan_control = _FanControl(self)
 
         # load last DPI/poll rate state
         if self.persistence.has_section(self.storage_name):
@@ -1105,6 +1110,10 @@ class RazerDevice(DBusService):
         self._battery_manager.frequency = self.config.getint('Startup', 'battery_notifier_freq', fallback=10 * 60)
         self._battery_manager.percent = self.config.getint('Startup', 'battery_notifier_percent', fallback=33)
 
+    def configure_fan_control(self, power_monitor):
+        if self._fan_control is not None:
+            self._fan_control.attach_power(power_monitor)
+
     def get_vid_pid(self):
         """
         Get the usb VID PID
@@ -1143,6 +1152,9 @@ class RazerDevice(DBusService):
         for method_name in self.methods_internal:
             try:
                 new_function = available_functions[method_name]
+                if any(not os.path.exists(self.get_driver_path(name)) for name in new_function.required_files):
+                    self.logger.debug("Skipping %s.%s: required driver files are missing", new_function.interface, new_function.name)
+                    continue
                 self.logger.debug("Adding %s.%s method to DBus", new_function.interface, new_function.name)
                 self.add_dbus_method(new_function.interface, new_function.name, new_function, new_function.in_sig, new_function.out_sig, new_function.byte_arrays)
             except KeyError as e:
@@ -1212,6 +1224,8 @@ class RazerDevice(DBusService):
         Close any resources opened by subclasses
         """
         if not self._is_closed:
+            if self._fan_control is not None:
+                self._fan_control.close()
             # If this is a mouse, retrieve current DPI for local storage
             # in case the user has changed the DPI on-the-fly
             # (e.g. the DPI buttons)

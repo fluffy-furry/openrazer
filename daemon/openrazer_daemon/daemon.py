@@ -29,6 +29,7 @@ from openrazer_daemon.dbus_services.service import DBusService
 from openrazer_daemon.device import DeviceCollection
 from openrazer_daemon.misc.screensaver_monitor import ScreensaverMonitor
 from openrazer_daemon.misc.autosave_persistence import PersistenceAutoSave
+from openrazer_daemon.misc.fan_power import FanPowerMonitor
 
 
 class RazerDaemon(DBusService):
@@ -117,6 +118,8 @@ class RazerDaemon(DBusService):
         self._init_screensaver_monitor()
 
         self._razer_devices = DeviceCollection()
+        supply_root = os.path.join(self._test_dir, 'power_supply') if self._test_dir is not None else '/sys/class/power_supply'
+        self._fan_power = FanPowerMonitor(self.logger, supply_root=supply_root, testing=self._test_dir is not None)
         self._load_devices(first_run=True)
 
         # Add DBus methods
@@ -512,6 +515,7 @@ class RazerDaemon(DBusService):
                         continue
 
                     self._razer_devices.add(sys_name, device_serial, razer_device)
+                    razer_device.configure_fan_control(self._fan_power)
 
                     device_number += 1
 
@@ -546,6 +550,7 @@ class RazerDaemon(DBusService):
                 if len(device_serial) > 0:
                     # Add Device
                     self._razer_devices.add(sys_name, device_serial, razer_device)
+                    razer_device.configure_fan_control(self._fan_power)
                     self.device_added()
                 else:
                     logging.warning("Could not get serial for device {0}. Skipping".format(sys_name))
@@ -653,6 +658,7 @@ class RazerDaemon(DBusService):
 
         for device in self._razer_devices:
             device.dbus.close()
+        self._fan_power.close()
 
         # Write config
         self.write_persistence(self._persistence_file)

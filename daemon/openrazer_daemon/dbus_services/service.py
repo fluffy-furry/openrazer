@@ -8,6 +8,7 @@ Service Object for DBus
 # pylint: disable=no-member
 
 import types
+import weakref
 import dbus
 import dbus.service
 
@@ -39,13 +40,23 @@ class DBusService(dbus.service.Object):
     """
     BUS_NAME = 'org.razer'
 
-    def __init__(self, object_path):
+    def __init__(self, object_path, isolate_methods=False):
         """
         Init the object
 
         :param object_path: DBus Object name
         :type object_path: str
+
+        :param isolate_methods: Keep dynamic methods private to this device
+        :type isolate_methods: bool
         """
+        if isolate_methods:
+            # dbus-python resolves methods through classes rather than instances.
+            model_class = self.__class__
+            self.__class__ = type(model_class.__name__ + '_' + format(id(self), 'x'), (model_class,), {'__module__': model_class.__module__})
+            class_key = self.__class__.__module__ + '.' + self.__class__.__name__
+            weakref.finalize(self, self._dbus_class_table.pop, class_key, None)
+
         # We could pass (bus, object_path) here, but we rather register the object manually.
         super().__init__()
 

@@ -8,7 +8,7 @@ Has an endpoint decorator to wrap a method for DBus
 from functools import wraps
 
 
-def endpoint(interface_name, function_name, in_sig=None, out_sig=None, byte_arrays=False):
+def endpoint(interface_name, function_name, in_sig=None, out_sig=None, byte_arrays=False, required_files=()):
     """
     DBus Endpoint
 
@@ -27,6 +27,9 @@ def endpoint(interface_name, function_name, in_sig=None, out_sig=None, byte_arra
     :param byte_arrays: is Byte Array
     :type byte_arrays: bool
 
+    :param required_files: Driver files required to expose the method
+    :type required_files: tuple[str, ...]
+
     :return: Function
     :rtype: callable
     """
@@ -40,6 +43,7 @@ def endpoint(interface_name, function_name, in_sig=None, out_sig=None, byte_arra
         wrapped.in_sig = in_sig
         wrapped.out_sig = out_sig
         wrapped.byte_arrays = byte_arrays
+        wrapped.required_files = required_files
         wrapped.code = func.__code__
         wrapped.globals = func.__globals__
         wrapped.defaults = func.__defaults__

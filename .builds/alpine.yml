@@ -60,6 +60,10 @@ tasks:
       python3 scripts/ci/test-blade-protocol.py
       python3 scripts/ci/test-blade-models.py
       python3 scripts/ci/test-blade-driver.py
+      python3 scripts/ci/test-blade-daemon.py
+      python3 scripts/ci/test-blade-monitor.py
+      python3 scripts/ci/test-blade-power.py
+      python3 scripts/ci/test-blade-control.py
 
   - functional-test-setup: |
       # The daemon wants the user to be in the plugdev group
