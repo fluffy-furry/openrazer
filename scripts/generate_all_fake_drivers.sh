@@ -7,7 +7,7 @@ if [ "$1" = "-f" ]; then
     rm $(dirname "$0")/../pylib/openrazer/_fake_driver/*.cfg
 fi
 
-drivers=$(ls driver/razer*_driver.c | cut -d'/' -f2 | cut -d'_' -f1)
+drivers=$(sed -n 's/^obj-m[[:space:]]*:=[[:space:]]*//p' driver/Makefile | sed 's/\.o//g')
 
 for driver in $drivers; do
     [ "$driver" = "razercore" ] && continue # razercore is currently broken

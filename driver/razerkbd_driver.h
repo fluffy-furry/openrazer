@@ -165,12 +165,17 @@
 #define RAZER_DEATHSTALKER_V2_WIRELESS_WAIT_US 4900
 #define RAZER_FIREFLY_WAIT_US 900
 
+struct razer_blade_model;
+
 struct razer_kbd_device {
     struct hid_device *hdev;
     struct mutex lock;
     unsigned char usb_interface_protocol;
     unsigned short usb_vid;
     unsigned short usb_pid;
+    bool blade_controls;
+    unsigned char blade_transaction;
+    const struct razer_blade_model *blade_model;
 
     unsigned char block_keys[3];
     unsigned char left_alt_on;

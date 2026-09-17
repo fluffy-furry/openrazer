@@ -34,6 +34,12 @@ declare -A files_metadata=(
     ["fast_charging_matrix_effect_static"]="w;"
     ["fast_charging_matrix_effect_wave"]="w;"
     ["firmware_version"]="r;v1.0"
+    ["fan_control"]="w;"
+    ["fan_limits"]="r;2300 2900 4300"
+    ["fan_modes"]="r;"
+    ["fan_rpm_monitor"]="r;"
+    ["fan_rpm"]="r;0x3120300a3220300a"
+    ["fan_state"]="r;0x312030206175746f20300a322030206175746f20300a"
     ["fully_charged_led_brightness"]="rw;0"
     ["fully_charged_matrix_effect_breath"]="w;"
     ["fully_charged_matrix_effect_none"]="w;"
@@ -154,6 +160,23 @@ fi
 
 driver_short=$(echo "$driver" | sed 's/razer//g')
 
+declare -A blade_fan_modes=()
+declare -A blade_fan_monitor=()
+if [ "$driver" = "razerkbd" ]; then
+    blade_catalog_dir=$(mktemp -d) || exit 1
+    trap 'rm -rf -- "$blade_catalog_dir"' EXIT
+    if ! "${CC:-cc}" -std=c99 -Wall -Wextra -Werror scripts/blade_model_metadata.c driver/razerblade_models.c -o "$blade_catalog_dir/models"; then
+        echo "Error: generating Blade metadata requires a C compiler (CC or cc)." >&2
+        exit 1
+    fi
+    blade_catalog=$("$blade_catalog_dir/models") || exit 1
+    while read -r product automatic manual monitored; do
+        [ -z "$product" ] && continue
+        blade_fan_modes[$product]="$automatic $manual"
+        blade_fan_monitor[$product]="$monitored"
+    done <<< "$blade_catalog"
+fi
+
 devices=$(git grep -h "#define USB_DEVICE_ID_RAZER_" driver/${driver}_driver.h | cut -d' ' -f2-3)
 
 # https://askubuntu.com/a/849016
@@ -182,6 +205,9 @@ while IFS= read -r device_raw; do
     device_attrs=$(echo "$device_attrs_lines" | get_attr_from_create_device_file)
 
     all_attrs=$(echo "$device_attrs"; echo "$common_attrs")
+    if [ -n "${blade_fan_modes[$device_pid]}" ]; then
+        all_attrs+=$'\nfan_control\nfan_limits\nfan_rpm\nfan_state\nfan_modes\nfan_rpm_monitor'
+    fi
     all_attrs=$(echo "$all_attrs" | sort)
 
     if [ -z "$device_attrs_lines" ]; then
@@ -240,6 +266,10 @@ EOF
             default="30:30"
         elif [ "$attr" = "device_serial" ]; then
             default="XX000000$device_pid"
+        elif [ "$attr" = "fan_modes" ]; then
+            default="${blade_fan_modes[$device_pid]}"
+        elif [ "$attr" = "fan_rpm_monitor" ]; then
+            default="${blade_fan_monitor[$device_pid]}"
         fi
 
         if [ "$first_attr" = false ]; then

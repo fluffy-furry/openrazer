@@ -54,6 +54,13 @@ tasks:
       echo "ccflags-y := -Wall -Werror" >> driver/Makefile
       make KERNELDIR="$kerneldir"
 
+  - test-blade-offline: |
+      cd openrazer
+
+      python3 scripts/ci/test-blade-protocol.py
+      python3 scripts/ci/test-blade-models.py
+      python3 scripts/ci/test-blade-driver.py
+
   - functional-test-setup: |
       # The daemon wants the user to be in the plugdev group
       sudo addgroup -S plugdev

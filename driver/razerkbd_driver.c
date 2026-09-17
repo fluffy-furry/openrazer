@@ -18,6 +18,7 @@
 #include "razerkbd_driver.h"
 #include "razercommon.h"
 #include "razerchromacommon.h"
+#include "razerblade_driver.h"
 
 /*
  * Version Information
@@ -5822,6 +5823,10 @@ static int razer_kbd_probe(struct hid_device *hdev, const struct hid_device_id *
         goto exit_free;
     }
 
+    err = razer_blade_init(dev);
+    if (err)
+        hid_warn(hdev, "Blade fan controls unavailable: %d\n", err);
+
     // Leave autosuspend on for laptops
     if (!is_blade_laptop(dev)) {
         usb_disable_autosuspend(usb_dev);
@@ -5846,6 +5851,8 @@ static void razer_kbd_disconnect(struct hid_device *hdev)
     struct usb_device *usb_dev = interface_to_usbdev(intf);
 
     dev = hid_get_drvdata(hdev);
+
+    razer_blade_remove(dev);
 
     // Other interfaces are actual key-emitting devices
     if(intf->cur_altsetting->desc.bInterfaceProtocol == USB_INTERFACE_PROTOCOL_MOUSE) {
