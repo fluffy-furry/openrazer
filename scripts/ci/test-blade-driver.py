@@ -113,6 +113,12 @@ class BladeDriverTests(unittest.TestCase):
     def test_selected_failure_recovers_only_requested_fans(self):
         self.scenario("selected-recovery")
 
+    def test_coupled_firmware_restores_all_fans_and_rejects_selected_control(self):
+        self.scenario("selected-coupled")
+
+    def test_coupled_targets_recheck_each_selected_fan(self):
+        self.scenario("selected-coupled-targets")
+
     def test_auxiliary_fan_group_can_be_controlled_without_touching_primary_fans(self):
         self.scenario("selected-auxiliary")
 

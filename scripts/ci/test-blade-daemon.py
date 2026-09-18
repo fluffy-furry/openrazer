@@ -73,6 +73,7 @@ class BladePersistenceTests(unittest.TestCase):
     def test_selected_preference_survives_only_on_registered_models(self):
         selected = {'fan_mode': 'selective', 'fan_targets': '3:3000,1:2900', 'fan_performance_mode': '0'}
         self.daemon._persistence.read_dict({'BLADE': selected, 'PLAIN': selected})
+        self.daemon._razer_devices[0].dbus.METHODS = keyboards.RazerBladeProEarly2020.METHODS
         loaded = self.save_and_read()
         self.assertFalse(loaded.has_option('BLADE', 'fan_mode'))
         self.assertFalse(loaded.has_option('PLAIN', 'fan_mode'))
@@ -222,7 +223,9 @@ class BladeDaemonTests(unittest.TestCase):
         connection = Mock()
         connection.list_exported_child_objects.return_value = []
         plain = self.make_device()
-        self.assertNotIn('getFanGroups', plain.Introspect('/org/razer/device/FANTEST123', connection))
+        plain_xml = plain.Introspect('/org/razer/device/FANTEST123', connection)
+        for method in ('getFanGroups', 'setFanManualFans', 'setFanAutoFans'):
+            self.assertNotIn(method, plain_xml)
         for missing in ('fan_groups', 'fan_control_select'):
             with self.subTest(missing=missing):
                 path = self.path / missing
@@ -375,6 +378,13 @@ class BladeDaemonTests(unittest.TestCase):
                 self.assertEqual(actual, set(FAN_METHODS), model.__name__)
                 registered.add(model.USB_PID)
         self.assertEqual(registered, FAN_MODELS)
+
+    def test_selective_methods_have_no_registered_model(self):
+        for model in vars(keyboards).values():
+            if isinstance(model, type) and hasattr(model, 'USB_PID'):
+                with self.subTest(model=model.__name__):
+                    self.assertFalse(set(model.METHODS).intersection(FAN_SELECT_METHODS))
+        self.assertTrue(set(keyboards.RazerBladeProEarly2020.METHODS).issuperset(FAN_METHODS))
 
     def load_methods(self, methods):
         device = SimpleNamespace(

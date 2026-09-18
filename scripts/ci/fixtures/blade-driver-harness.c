@@ -110,6 +110,7 @@ static struct {
     u8 power_flags, power_status, power_payload_size, power_header_fault;
     bool power_bad_checksum;
     u8 fail_target_fan, ignore_auto_fan, fail_auto_read_fan;
+    bool coupled_fans;
     u8 rpm_fault_fan, rpm_status, rpm_payload_size, rpm_bad_echo;
     int rpm_receive_error, target_read_error;
     int limits_receive_error;
@@ -273,15 +274,27 @@ static int razer_send_control_msg(struct hid_device *h, const void *data,
         assert(fan >= 1 && fan <= 4);
         if (!r[11])
             mock.auto_writes[fan]++;
-        if (r[11] || mock.ignore_auto_fan != fan) {
-            mock.performance[fan] = r[10];
-            mock.manual[fan] = r[11];
+        for (i = 1; i <= mock.fan_count; i++) {
+            u8 affected = mock.coupled_fans ? mock.fan_ids[i - 1] : fan;
+
+            if (r[11] || mock.ignore_auto_fan != affected) {
+                mock.performance[affected] = r[10];
+                mock.manual[affected] = r[11];
+            }
+            if (!mock.coupled_fans)
+                break;
         }
     } else if (cmd == 0x01) {
         assert(fan >= 1 && fan <= 4);
         if (mock.fail_target_fan == fan)
             return -EPIPE;
-        mock.target[fan] = r[10];
+        for (i = 1; i <= mock.fan_count; i++) {
+            u8 affected = mock.coupled_fans ? mock.fan_ids[i - 1] : fan;
+
+            mock.target[affected] = r[10];
+            if (!mock.coupled_fans)
+                break;
+        }
     }
     return 0;
 }
@@ -392,8 +405,10 @@ static void reset(void)
     memset(&hid, 0, sizeof(hid));
     device.hdev = &hid;
     device.usb_pid = 0x0256;
-    device.blade_model = razer_blade_lookup_model(0x0256, 2);
-    assert(device.blade_model);
+    custom = *razer_blade_lookup_model(0x0256, 2);
+    custom.features |= RAZER_BLADE_FAN_SELECT;
+    custom.fan_groups = "cpu_gpu 1,2\nbattery 3,4\n";
+    device.blade_model = &custom;
     hid.dev.driver_data = &device;
     alternate.desc.bInterfaceNumber = 2;
     mock.target[1] = mock.target[2] = 29;
@@ -1057,6 +1072,23 @@ int main(int argc, char **argv)
         reset();
         guarded_model(0x029F);
         assert(fan_select_store("auto 1") == -EOPNOTSUPP && !mock.sends);
+    } else if (!strcmp(name, "selected-coupled")) {
+        mock.fan_count = 4;
+        mock.fan_ids[2] = 3;
+        mock.fan_ids[3] = 4;
+        mock.coupled_fans = true;
+        assert(fan_select_store("manual 3:2900") == -EIO);
+        for (i = 1; i <= 4; i++) {
+            assert(!mock.manual[i]);
+            assert(mock.auto_writes[i] == 1);
+        }
+        assert(!mock.warnings);
+    } else if (!strcmp(name, "selected-coupled-targets")) {
+        mock.coupled_fans = true;
+        assert(fan_select_store("manual 1:2900,2:3000") == -EIO);
+        assert(!mock.manual[1] && !mock.manual[2]);
+        assert(mock.auto_writes[1] == 1 && mock.auto_writes[2] == 1);
+        assert(!mock.warnings);
     } else if (!strcmp(name, "sysfs-gate")) {
         device.usb_pid = 0xFFFF;
         assert(!razer_blade_init(&device) && !device.blade_controls && !mock.groups_created);
@@ -1072,6 +1104,10 @@ int main(int argc, char **argv)
         assert(!mock.groups_removed);
         mock.group_error = 0;
         assert(!razer_blade_init(&device) && device.blade_controls);
+        assert(!(device.blade_model->features & RAZER_BLADE_FAN_SELECT));
+        assert(!blade_group.is_visible(&hid.dev.kobj, &dev_attr_fan_groups.attr, 6));
+        assert(!blade_group.is_visible(&hid.dev.kobj, &dev_attr_fan_control_select.attr, 7));
+        assert(fan_select_store("manual 3:2900") == -EOPNOTSUPP);
         razer_blade_remove(&device);
         assert(mock.groups_removed == 1);
         assert(!mock.sends && !mock.receives && !mock.pm_gets);

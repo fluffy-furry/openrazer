@@ -11,6 +11,10 @@ from openrazer_daemon.dbus_services.dbus_methods import fan
 from openrazer_daemon.misc.fan_monitor import FanMonitor
 
 
+class _FanIsolationError(RuntimeError):
+    pass
+
+
 class FanControl:
     def __init__(self, device):
         self._device = device
@@ -59,6 +63,57 @@ class FanControl:
     def _write_selected(self, value):
         with open(self._device.get_driver_path('fan_control_select'), 'w') as driver_file:
             driver_file.write(value)
+
+    def _fail_selected_isolation(self, reason):
+        self._monitor.cancel(reason)
+        self._owned = True
+        self._uncertain = True
+        self._requested_rpm = None
+        self._requested_performance = None
+        self._expected_modes = {}
+        self._selected_targets = {}
+        self._selected_owned = {}
+        self._selected_expected_modes = {}
+        self._pending_auto_ids = ()
+        self._pending_auto_state = {}
+        self._external_note = ''
+        self._recovery_reason = reason
+        self._recovery_state = 'error'
+        self._recovery_attempts = 1
+        try:
+            self._write('auto')
+        except Exception as error:
+            self._recovery_failed = True
+            self._policy_status = ('error', 0, {}, reason + '; global automatic restoration failed: ' + str(error))
+            self._device.logger.error('%s', self._policy_status[3])
+        else:
+            self._owned = False
+            self._uncertain = False
+            self._recovery_failed = False
+            self._recovery_attempts = 0
+            self._policy_status = ('error', 0, {}, reason + '; all fans restored to automatic control')
+            self._device.logger.error('%s', self._policy_status[3])
+        self._save_preference()
+        raise _FanIsolationError(reason)
+
+    def _write_selected_checked(self, value, selected):
+        before = {fan_id: (performance, mode, rpm) for fan_id, performance, mode, rpm in fan.get_fan_state(self._device)}
+        write_error = None
+        try:
+            self._write_selected(value)
+        except Exception as error:
+            write_error = error
+        try:
+            after = {fan_id: (performance, mode, rpm) for fan_id, performance, mode, rpm in fan.get_fan_state(self._device)}
+        except Exception as error:
+            self._fail_selected_isolation('Could not verify fan isolation after a selected write: ' + str(error))
+        changed = sorted(fan_id for fan_id in before.keys() | after.keys()
+                         if fan_id not in selected and before.get(fan_id) != after.get(fan_id))
+        if changed or before.keys() != after.keys():
+            self._fail_selected_isolation('Selected fan write changed nonselected fan state'
+                                          + (': ' + ','.join(map(str, changed)) if changed else ''))
+        if write_error is not None:
+            raise write_error
 
     @staticmethod
     def _target_value(targets):
@@ -205,10 +260,12 @@ class FanControl:
         self._recovery_attempts = 0
         try:
             command = 'manual ' + ','.join(f'{fan_id}:{targets[fan_id]}' for fan_id in sorted(targets))
-            self._write_selected(command)
+            self._write_selected_checked(command, targets)
             if self._power_monitor.power != 'ac':
                 raise RuntimeError('AC power changed during the manual request')
             self._monitor.start_targets(targets, monitored, self._selected_expected_modes)
+        except _FanIsolationError:
+            raise
         except Exception:
             self._selected_automatic('Manual request failed', 'error')
             raise
@@ -261,7 +318,9 @@ class FanControl:
             self._monitor.cancel('Automatic control requested for selected fans')
             command = 'auto ' + ','.join(str(fan_id) for fan_id in sorted(fan_ids))
             try:
-                self._write_selected(command)
+                self._write_selected_checked(command, fan_ids)
+            except _FanIsolationError:
+                raise
             except Exception as error:
                 self._recovery_failed = True
                 self._recovery_attempts = 1
@@ -325,11 +384,13 @@ class FanControl:
         self._recovery_state = state
         self._recovery_attempts += 1
         try:
-            self._write_selected('auto ' + ','.join(str(fan_id) for fan_id in sorted(restore)))
+            self._write_selected_checked('auto ' + ','.join(str(fan_id) for fan_id in sorted(restore)), restore)
             self._selected_owned = {}
             self._uncertain = False
             self._recovery_failed = False
             self._recovery_attempts = 0
+        except _FanIsolationError:
+            return
         except Exception as error:
             self._recovery_failed = True
             self._policy_status = ('error', target, previous[2], reason + ': automatic restoration failed: ' + str(error))
@@ -367,7 +428,9 @@ class FanControl:
         self._pending_auto_state = {fan_id: self._pending_auto_state[fan_id] for fan_id in retry}
         if retry:
             try:
-                self._write_selected('auto ' + ','.join(str(fan_id) for fan_id in sorted(retry)))
+                self._write_selected_checked('auto ' + ','.join(str(fan_id) for fan_id in sorted(retry)), retry)
+            except _FanIsolationError:
+                return
             except Exception as error:
                 self._save_preference()
                 self._policy_status = ('error', 0, {}, 'Automatic control requested for selected fans: ' + str(error))

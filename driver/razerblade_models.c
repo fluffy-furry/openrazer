@@ -18,8 +18,7 @@
 
 static const struct razer_blade_model blade_models[] = {
     RPM_MODEL(0x0253, BALANCED_CUSTOM_DC, 0), /* Blade 15 Advanced (2020) */
-    RPM_GROUP_MODEL(0x0256, BALANCED_CUSTOM_DC, RAZER_BLADE_FAN_SELECT,
-                    "cpu_gpu 1,2\nbattery 3,4\n"), /* Blade Pro 17 (Early 2020) */
+    RPM_MODEL(0x0256, BALANCED_CUSTOM_DC, 0), /* Blade Pro 17 (Early 2020) */
     RPM_MODEL(0x026E, BALANCED_CUSTOM_DC, 0), /* Blade 17 Pro (Early 2021) */
     RPM_MODEL(0x0270, BALANCED_CUSTOM_DC, 0), /* Blade 14 (2021, AMD) */
     RPM_MODEL(0x028B, BALANCED_CUSTOM_DC | (1U << 5), 0), /* Blade 17 (2022) */

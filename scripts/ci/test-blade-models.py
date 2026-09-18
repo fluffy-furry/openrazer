@@ -67,14 +67,13 @@ class BladeModelTests(unittest.TestCase):
                 self.assertEqual(model.product_id, product)
                 self.assertEqual(model.interface_number, 2)
                 self.assertEqual((model.fan_profile, model.info_profile), (1, 0))
-                features = 5 if product == 0x0256 else 3 if product in (0x029F, 0x02B8) else 1
+                features = 3 if product in (0x029F, 0x02B8) else 1
                 self.assertEqual(model.features, features)
                 self.assertEqual(model.manual_modes, 1 << 0)
                 automatic = sum(1 << mode for mode in self.AUTOMATIC_MODES[product])
                 self.assertEqual(model.automatic_modes, automatic)
                 self.assertEqual(model.monitored_fans, (1 << 1) | (1 << 2))
-                self.assertEqual(model.fan_groups,
-                                 b"cpu_gpu 1,2\nbattery 3,4\n" if product == 0x0256 else None)
+                self.assertIsNone(model.fan_groups)
 
     def test_unknown_products_and_other_interfaces_are_not_enabled(self):
         for product in (0, 0x0255, 0x02FF, 0xFFFF):

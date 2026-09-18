@@ -395,6 +395,60 @@ class BladeControlTests(unittest.TestCase):
         self.assertEqual(self.control.status[0], 'accepted')
         self.monitor.start_targets.assert_called_once_with({3: 2900}, (), {3: 0})
 
+    def test_selected_firmware_coupling_restores_all_and_discards_intent(self):
+        def coupled_write(value):
+            self.selected_writes.append(value)
+            self.state('manual', 2900)
+
+        self.control._write_selected = coupled_write
+        with self.assertRaises(RuntimeError):
+            self.control.set_manual_fans({3: 2900})
+        self.assertEqual(self.selected_writes, ['manual 3:2900'])
+        self.assertEqual(self.writes, ['auto'])
+        self.assertEqual((self.path / 'fan_state').read_text(), '1 0 auto 0\n2 0 auto 0\n3 0 auto 0\n4 0 auto 0\n')
+        self.assertEqual(self.control._selected_owned, {})
+        self.assertEqual(self.control._selected_targets, {})
+        self.assertEqual(self.device.persistence.get('FANCONTROL', 'fan_mode'), 'auto')
+        self.assertEqual(self.control.status[0], 'error')
+        self.monitor.start_targets.assert_not_called()
+
+    def test_selected_firmware_coupling_retries_failed_global_restore(self):
+        def coupled_write(value):
+            self.selected_writes.append(value)
+            self.state('manual', 2900)
+
+        self.control._write_selected = coupled_write
+        self.write_error = OSError(errno.EIO, 'transport failed')
+        with self.assertRaises(RuntimeError):
+            self.control.set_manual_fans({3: 2900})
+        self.assertEqual(self.writes, ['auto'])
+        self.assertTrue(self.control._owned)
+        self.assertEqual(self.control._selected_targets, {})
+        self.assertEqual(self.device.persistence.get('FANCONTROL', 'fan_mode'), 'auto')
+        self.write_error = None
+        self.control.check_status()
+        self.assertEqual(self.writes, ['auto', 'auto'])
+        self.assertEqual((self.path / 'fan_state').read_text(), '1 0 auto 0\n2 0 auto 0\n3 0 auto 0\n4 0 auto 0\n')
+        self.assertFalse(self.control._owned)
+
+    def test_selected_auto_firmware_coupling_restores_all_and_discards_intent(self):
+        self.control.set_manual_fans({1: 2900, 3: 2900})
+
+        def coupled_write(value):
+            self.selected_writes.append(value)
+            self.state('auto', 0)
+
+        self.control._write_selected = coupled_write
+        with self.assertRaises(RuntimeError):
+            self.control.set_auto_fans((3,))
+        self.assertEqual(self.selected_writes, ['manual 1:2900,3:2900', 'auto 3'])
+        self.assertEqual(self.writes, ['auto'])
+        self.assertEqual((self.path / 'fan_state').read_text(), '1 0 auto 0\n2 0 auto 0\n3 0 auto 0\n4 0 auto 0\n')
+        self.assertEqual(self.control._selected_owned, {})
+        self.assertEqual(self.control._selected_targets, {})
+        self.assertEqual(self.device.persistence.get('FANCONTROL', 'fan_mode'), 'auto')
+        self.assertEqual(self.control.status[0], 'error')
+
     def test_selected_external_change_is_not_reset(self):
         self.control.set_manual_fans({1: 2900, 3: 3000})
         (self.path / 'fan_state').write_text('1 0 manual 3400\n2 0 auto 0\n3 0 manual 3000\n4 0 auto 0\n')

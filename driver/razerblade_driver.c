@@ -161,6 +161,32 @@ static int blade_fan_state_get(struct razer_kbd_device *device, struct blade_fan
     return 0;
 }
 
+static int blade_fan_unselected_unchanged(struct razer_kbd_device *device,
+        const struct blade_fan_state available[BLADE_MAX_FANS], unsigned int fan_count,
+        const struct blade_fan_state selected[BLADE_MAX_FANS], unsigned int selected_count)
+{
+    struct blade_fan_state readback;
+    unsigned int i, j;
+    int err;
+
+    for (i = 0; i < fan_count; i++) {
+        for (j = 0; j < selected_count; j++) {
+            if (available[i].id == selected[j].id)
+                break;
+        }
+        if (j != selected_count)
+            continue;
+        readback.id = available[i].id;
+        err = blade_fan_state_get(device, &readback);
+        if (err)
+            return err;
+        if (readback.performance != available[i].performance ||
+            readback.manual != available[i].manual || readback.target != available[i].target)
+            return -EIO;
+    }
+    return 0;
+}
+
 static int blade_fan_rpm_get(struct razer_kbd_device *device, u8 fan_id, unsigned int *rpm)
 {
     struct razer_report response;
@@ -407,9 +433,9 @@ static ssize_t fan_control_select_store(struct device *dev, struct device_attrib
     unsigned int fan_count, selected_count = 0, i, j, id, value;
     const char *cursor, *end;
     size_t length = count;
-    u8 targets[BLADE_MAX_FANS];
     u8 limits[3];
     bool manual;
+    bool recover_all = false;
     int err, recovery;
 
     if ((device->blade_model->features & (RAZER_BLADE_FAN_CONTROL | RAZER_BLADE_FAN_SELECT)) !=
@@ -450,7 +476,7 @@ static ssize_t fan_control_select_store(struct device *dev, struct device_attrib
                 return -EINVAL;
         }
         selected[selected_count].id = id;
-        targets[selected_count++] = value / 100;
+        selected[selected_count++].target = value / 100;
         if (cursor == end)
             break;
         cursor++;
@@ -488,17 +514,30 @@ static ssize_t fan_control_select_store(struct device *dev, struct device_attrib
         if (err)
             goto out;
         for (i = 0; i < selected_count; i++) {
-            if (targets[i] < limits[0] || targets[i] > limits[2]) {
+            if (selected[i].target < limits[0] || selected[i].target > limits[2]) {
                 err = -ERANGE;
                 goto out;
             }
+        }
+    }
+    for (j = 0; j < fan_count; j++) {
+        for (i = 0; i < selected_count; i++) {
+            if (available[j].id == selected[i].id)
+                break;
+        }
+        if (i == selected_count) {
+            err = blade_fan_state_get(device, &available[j]);
+            if (err)
+                goto out;
+        } else {
+            available[j].performance = selected[i].performance;
         }
     }
     err = blade_prepare_fan_control(device, selected[0].performance);
     if (err)
         goto out;
     for (i = 0; i < selected_count; i++) {
-        const u8 args[3] = {device->blade_model->fan_profile, selected[i].id, targets[i]};
+        const u8 args[3] = {device->blade_model->fan_profile, selected[i].id, selected[i].target};
 
         err = blade_fan_mode_set(device, &selected[i], manual);
         if (err)
@@ -511,25 +550,45 @@ static ssize_t fan_control_select_store(struct device *dev, struct device_attrib
         readback.id = selected[i].id;
         err = manual ? blade_fan_state_get(device, &readback) : blade_fan_mode_get(device, &readback);
         if (!err && (readback.performance != selected[i].performance ||
-                     readback.manual != manual || (manual && readback.target != targets[i])))
+                     readback.manual != manual || (manual && readback.target != selected[i].target)))
             err = -EIO;
         if (err)
             goto recover_auto;
     }
+    for (i = 0; i < selected_count; i++) {
+        readback.id = selected[i].id;
+        err = manual ? blade_fan_state_get(device, &readback) : blade_fan_mode_get(device, &readback);
+        if (!err && (readback.performance != selected[i].performance ||
+                     readback.manual != manual || (manual && readback.target != selected[i].target)))
+            err = -EIO;
+        if (err)
+            goto recover_auto;
+    }
+    err = blade_fan_unselected_unchanged(device, available, fan_count,
+                                         selected, selected_count);
+    if (err) {
+        recover_all = true;
+        goto recover_auto;
+    }
     goto out;
 
 recover_auto:
-    for (i = 0; i < selected_count; i++) {
-        recovery = blade_fan_mode_set(device, &selected[i], 0);
+    if (!recover_all && blade_fan_unselected_unchanged(device, available, fan_count,
+                                                        selected, selected_count))
+        recover_all = true;
+    for (i = 0; i < (recover_all ? fan_count : selected_count); i++) {
+        const struct blade_fan_state *fan = recover_all ? &available[i] : &selected[i];
+
+        recovery = blade_fan_mode_set(device, fan, 0);
         if (!recovery) {
-            readback.id = selected[i].id;
+            readback.id = fan->id;
             recovery = blade_fan_mode_get(device, &readback);
-            if (!recovery && (readback.manual || readback.performance != selected[i].performance))
+            if (!recovery && (readback.manual || readback.performance != fan->performance))
                 recovery = -EIO;
         }
         if (recovery)
             hid_warn(device->hdev, "Could not confirm automatic control of fan %u: %d\n",
-                     selected[i].id, recovery);
+                     fan->id, recovery);
     }
 out:
     mutex_unlock(&device->lock);

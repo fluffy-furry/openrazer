@@ -64,6 +64,21 @@ class BladeClientTests(unittest.TestCase):
         self.assertIn(call(self.proxy, 'razer.device.fan'), self.interface_factory.call_args_list)
         self.assertEqual(self.fan.mock_calls, [])
 
+    def test_pid0256_has_no_selective_control_without_registered_methods(self):
+        device = self.device()
+        self.assertEqual((device._vid, device._pid), (0x1532, 0x0256))
+        with self.assertRaises(NotImplementedError):
+            _ = device.fan_groups
+        with self.assertRaises(NotImplementedError):
+            device.set_fan_manual_fans({3: 2900})
+        with self.assertRaises(NotImplementedError):
+            device.set_fan_auto_fans((3,))
+        with self.assertRaises(NotImplementedError):
+            device.set_fan_group_manual('battery', 2900)
+        with self.assertRaises(NotImplementedError):
+            device.set_fan_group_auto('battery')
+        self.assertEqual(self.fan.mock_calls, [])
+
     def test_capability_requires_every_method(self):
         for missing in self.METHODS:
             with self.subTest(missing=missing):
