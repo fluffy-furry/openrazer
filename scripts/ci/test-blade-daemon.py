@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / 'daemon'))
 import dbus
 from openrazer_daemon.dbus_services.dbus_methods import fan
 from openrazer_daemon.dbus_services.service import DBusService
+from openrazer_daemon.daemon import RazerDaemon
 from openrazer_daemon.hardware.device_base import RazerDevice
 from openrazer_daemon.hardware import keyboards
 from openrazer_daemon.misc.fan_control import FanControl
@@ -27,6 +28,45 @@ from openrazer_daemon.misc.fan_monitor import FanMonitor
 FAN_METHODS = ('get_fan_state', 'get_fan_rpm', 'get_fan_limits', 'get_fan_config', 'get_fan_status', 'set_fan_auto', 'set_fan_manual')
 FAN_FILES = ('fan_state', 'fan_rpm', 'fan_limits', 'fan_control', 'fan_modes', 'fan_rpm_monitor')
 FAN_MODELS = {0x0253, 0x0256, 0x026E, 0x0270, 0x028B, 0x029F, 0x02B8, 0x02C6}
+
+
+class BladePersistenceTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix='openrazer-fan-persistence-')
+        self.addCleanup(directory.cleanup)
+        self.path = Path(directory.name) / 'persistence.conf'
+        self.daemon = SimpleNamespace(logger=Mock(), _persistence=configparser.ConfigParser())
+        fan_device = SimpleNamespace(storage_name='BLADE', _fan_control=object(), METHODS=['set_fan_manual', 'set_dpi_xy'],
+                                     dpi=(800, 900), ZONES={}, zone={})
+        plain_device = SimpleNamespace(storage_name='PLAIN', _fan_control=None, METHODS=[], dpi=(0, 0), ZONES={}, zone={})
+        self.daemon._razer_devices = [SimpleNamespace(dbus=fan_device), SimpleNamespace(dbus=plain_device)]
+
+    def save_and_read(self):
+        RazerDaemon.write_persistence(self.daemon, str(self.path))
+        loaded = configparser.ConfigParser()
+        loaded.read(self.path)
+        return loaded
+
+    def test_saved_manual_and_auto_survive_daemon_persistence_rebuild(self):
+        self.daemon._persistence.read_dict({'BLADE': {'fan_mode': 'manual', 'fan_rpm': '2900', 'fan_performance_mode': '0', 'old_effect': 'stale'},
+                                            'PLAIN': {'fan_mode': 'manual', 'fan_rpm': '2900', 'fan_performance_mode': '0'}})
+        loaded = self.save_and_read()
+        self.assertEqual(dict(loaded['BLADE']), {'fan_mode': 'manual', 'fan_rpm': '2900', 'fan_performance_mode': '0', 'dpi_x': '800', 'dpi_y': '900'})
+        self.assertEqual(dict(loaded['PLAIN']), {})
+
+        self.daemon._persistence.set('BLADE', 'fan_mode', 'auto')
+        loaded = self.save_and_read()
+        self.assertEqual(dict(loaded['BLADE']), {'fan_mode': 'auto', 'dpi_x': '800', 'dpi_y': '900'})
+
+    def test_incomplete_or_invalid_manual_preference_is_not_saved(self):
+        for values in ({'fan_mode': 'manual', 'fan_rpm': '2900'},
+                       {'fan_mode': 'manual', 'fan_rpm': '2950', 'fan_performance_mode': '0'},
+                       {'fan_mode': 'manual', 'fan_rpm': '2900', 'fan_performance_mode': '32'}):
+            with self.subTest(values=values):
+                self.daemon._persistence.remove_section('BLADE')
+                self.daemon._persistence.read_dict({'BLADE': values})
+                loaded = self.save_and_read()
+                self.assertFalse(loaded.has_option('BLADE', 'fan_mode'))
 
 
 class _FanDevice(RazerDevice):

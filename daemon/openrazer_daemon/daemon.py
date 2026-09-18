@@ -329,7 +329,22 @@ class RazerDaemon(DBusService):
         self.logger.debug('Writing persistence config')
 
         for device in self._razer_devices:
-            self._persistence[device.dbus.storage_name] = {}
+            section = device.dbus.storage_name
+            fan_preference = {}
+            if getattr(device.dbus, '_fan_control', None) is not None and self._persistence.has_section(section):
+                mode = self._persistence.get(section, 'fan_mode', fallback=None)
+                if mode == 'auto':
+                    fan_preference['fan_mode'] = mode
+                elif mode == 'manual':
+                    try:
+                        rpm = self._persistence.getint(section, 'fan_rpm')
+                        performance = self._persistence.getint(section, 'fan_performance_mode')
+                    except (ValueError, configparser.Error):
+                        pass
+                    else:
+                        if 0 < rpm <= 25500 and rpm % 100 == 0 and 0 <= performance < 32:
+                            fan_preference = {'fan_mode': mode, 'fan_rpm': str(rpm), 'fan_performance_mode': str(performance)}
+            self._persistence[section] = fan_preference
             if 'set_dpi_xy' in device.dbus.METHODS or 'set_dpi_xy_byte' in device.dbus.METHODS:
                 dpi_x = int(device.dbus.dpi[0])
                 dpi_y = int(device.dbus.dpi[1])
