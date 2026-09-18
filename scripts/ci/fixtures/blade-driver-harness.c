@@ -452,6 +452,12 @@ static ssize_t fan_select_store(const char *value)
     balanced();
     return ret;
 }
+static ssize_t fan_target_store(const char *value)
+{
+    ssize_t ret = fan_control_targets_store(&hid.dev, NULL, value, strlen(value));
+    balanced();
+    return ret;
+}
 static unsigned int sent_count(u8 cmd)
 {
     unsigned int i, count = 0;
@@ -942,14 +948,20 @@ int main(int argc, char **argv)
             assert(!blade_group.is_visible(&hid.dev.kobj, attr, i));
             custom.features = RAZER_BLADE_FAN_SELECT;
             assert(!blade_group.is_visible(&hid.dev.kobj, attr, i));
+            custom.features = RAZER_BLADE_FAN_TARGETS;
+            assert(!blade_group.is_visible(&hid.dev.kobj, attr, i));
             custom.features = RAZER_BLADE_FAN_CONTROL;
             assert(blade_group.is_visible(&hid.dev.kobj, attr, i) == (i < 6 ? attr->mode : 0));
             custom.features |= RAZER_BLADE_MAX_FAN_OVERRIDE;
             assert(blade_group.is_visible(&hid.dev.kobj, attr, i) == (i < 6 ? attr->mode : 0));
             custom.features = RAZER_BLADE_FAN_CONTROL | RAZER_BLADE_FAN_SELECT;
+            assert(blade_group.is_visible(&hid.dev.kobj, attr, i) == (i < 8 ? attr->mode : 0));
+            custom.features = RAZER_BLADE_FAN_CONTROL | RAZER_BLADE_FAN_TARGETS;
+            assert(blade_group.is_visible(&hid.dev.kobj, attr, i) == (i < 6 || i >= 8 ? attr->mode : 0));
+            custom.features |= RAZER_BLADE_FAN_SELECT;
             assert(blade_group.is_visible(&hid.dev.kobj, attr, i) == attr->mode);
         }
-        assert(i == 8);
+        assert(i == 10);
         assert(!blade_group.name);
         assert(dev_attr_fan_state.attr.mode == 0440 && dev_attr_fan_limits.attr.mode == 0440);
         assert(dev_attr_fan_rpm.attr.mode == 0440 && !dev_attr_fan_rpm.store);
@@ -958,6 +970,8 @@ int main(int argc, char **argv)
         assert(dev_attr_fan_rpm_monitor.attr.mode == 0440 && !dev_attr_fan_rpm_monitor.store);
         assert(dev_attr_fan_groups.attr.mode == 0440 && !dev_attr_fan_groups.store);
         assert(dev_attr_fan_control_select.attr.mode == 0220 && !dev_attr_fan_control_select.show);
+        assert(dev_attr_fan_target_ids.attr.mode == 0440 && !dev_attr_fan_target_ids.store);
+        assert(dev_attr_fan_control_targets.attr.mode == 0220 && !dev_attr_fan_control_targets.show);
         assert(!mock.sends && !mock.receives && !mock.pm_gets);
     } else if (!strcmp(name, "model-metadata")) {
         char output[PAGE_SIZE];
@@ -965,6 +979,8 @@ int main(int argc, char **argv)
         assert(!strcmp(output, "81 1\n"));
         assert(fan_rpm_monitor_show(&hid.dev, NULL, output) > 0);
         assert(!strcmp(output, "6\n"));
+        assert(fan_target_ids_show(&hid.dev, NULL, output) > 0);
+        assert(!strcmp(output, "1,2\n"));
         assert(fan_groups_show(&hid.dev, NULL, output) > 0);
         assert(!strcmp(output, "cpu_gpu 1,2\nbattery 3,4\n"));
         custom = *device.blade_model;
@@ -977,6 +993,83 @@ int main(int argc, char **argv)
         assert(fan_rpm_monitor_show(&hid.dev, NULL, output) > 0);
         assert(!strcmp(output, "2\n"));
         assert(!mock.sends && !mock.receives && !mock.pm_gets);
+    } else if (!strcmp(name, "target-only")) {
+        char output[PAGE_SIZE];
+        mock.fan_count = 4;
+        mock.fan_ids[2] = 3;
+        mock.fan_ids[3] = 4;
+        for (i = 1; i <= 4; i++) {
+            mock.manual[i] = 1;
+            mock.target[i] = 29;
+        }
+        assert(fan_target_ids_show(&hid.dev, NULL, output) == 4);
+        assert(!strcmp(output, "1,2\n"));
+        assert(!mock.sends);
+        assert(fan_target_store("1:4300,2:2900\n") == 14);
+        assert(mock.target[1] == 43 && mock.target[2] == 29);
+        assert(mock.target[3] == 29 && mock.target[4] == 29);
+        assert(sent_count(0x01) == 2 && sent_count(0x02) == 0);
+        assert(mock.writes == 2 && !mock.warnings);
+        for (i = 1; i <= 4; i++)
+            assert(mock.manual[i] == 1 && !mock.auto_writes[i]);
+    } else if (!strcmp(name, "target-preflight")) {
+        const char *invalid[] = {"", "auto", "manual 1:4300", "1:0", "1:4301",
+                                 "1:4300,", "1:4300,1:2900", "3:2900", "1:25600",
+                                 "1:27900"};
+        for (i = 0; i < sizeof(invalid) / sizeof(*invalid); i++) {
+            reset();
+            assert(fan_target_store(invalid[i]) == -EINVAL);
+            assert(!mock.sends && !mock.writes);
+        }
+        reset();
+        assert(fan_target_store("1:2200") == -EAGAIN && !mock.writes);
+        reset();
+        mock.manual[1] = mock.manual[2] = 1;
+        assert(fan_target_store("1:2200") == -ERANGE && !mock.writes);
+        assert(fan_target_store("2:4400") == -ERANGE && !mock.writes);
+        reset();
+        mock.manual[1] = 1;
+        assert(fan_target_store("1:4300") == -EAGAIN && !mock.writes);
+        reset();
+        mock.manual[1] = mock.manual[2] = 1;
+        mock.performance[2] = 6;
+        assert(fan_target_store("1:4300") == -EAGAIN && !mock.writes);
+        reset();
+        mock.manual[1] = 1;
+        mock.fan_count = 1;
+        assert(fan_target_store("2:4300") == -ENODEV && !mock.writes);
+        reset();
+        guarded_model(0x029F);
+        assert(fan_target_store("1:4300") == -EOPNOTSUPP && !mock.sends);
+    } else if (!strcmp(name, "target-coupled")) {
+        mock.fan_count = 4;
+        mock.fan_ids[2] = 3;
+        mock.fan_ids[3] = 4;
+        for (i = 1; i <= 4; i++) {
+            mock.manual[i] = 1;
+            mock.target[i] = 29;
+        }
+        mock.coupled_fans = true;
+        assert(fan_target_store("1:4300") == -EIO);
+        assert(sent_count(0x01) == 1 && sent_count(0x02) == 4);
+        for (i = 1; i <= 4; i++) {
+            assert(!mock.manual[i]);
+            assert(mock.auto_writes[i] == 1);
+        }
+        assert(!mock.warnings);
+    } else if (!strcmp(name, "target-error-recovery")) {
+        mock.fan_count = 4;
+        mock.fan_ids[2] = 3;
+        mock.fan_ids[3] = 4;
+        for (i = 1; i <= 4; i++) {
+            mock.manual[i] = 1;
+            mock.target[i] = 29;
+        }
+        mock.fail_target_fan = 2;
+        assert(fan_target_store("1:4300,2:2900") == -EPIPE);
+        assert(sent_count(0x01) == 2 && sent_count(0x02) == 4);
+        for (i = 1; i <= 4; i++)
+            assert(!mock.manual[i] && mock.auto_writes[i] == 1);
     } else if (!strcmp(name, "selected-control")) {
         mock.fan_count = 4;
         mock.fan_ids[2] = 3;
@@ -1107,6 +1200,10 @@ int main(int argc, char **argv)
         assert(!(device.blade_model->features & RAZER_BLADE_FAN_SELECT));
         assert(!blade_group.is_visible(&hid.dev.kobj, &dev_attr_fan_groups.attr, 6));
         assert(!blade_group.is_visible(&hid.dev.kobj, &dev_attr_fan_control_select.attr, 7));
+        assert(device.blade_model->features & RAZER_BLADE_FAN_TARGETS);
+        assert(device.blade_model->target_fans == (BIT(1) | BIT(2)));
+        assert(blade_group.is_visible(&hid.dev.kobj, &dev_attr_fan_target_ids.attr, 8) == 0440);
+        assert(blade_group.is_visible(&hid.dev.kobj, &dev_attr_fan_control_targets.attr, 9) == 0220);
         assert(fan_select_store("manual 3:2900") == -EOPNOTSUPP);
         razer_blade_remove(&device);
         assert(mock.groups_removed == 1);

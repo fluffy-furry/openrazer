@@ -18,8 +18,13 @@ int main(void)
             fprintf(stderr, "Invalid fan group registration for %04X\n", product);
             return 1;
         }
-        printf("%04X %u %u %u %u ", product, model->automatic_modes,
-               model->manual_modes, model->monitored_fans,
+        if (!!(model->features & RAZER_BLADE_FAN_TARGETS) != !!model->target_fans ||
+                (model->target_fans & 1U)) {
+            fprintf(stderr, "Invalid fan target registration for %04X\n", product);
+            return 1;
+        }
+        printf("%04X %u %u %u %u %u ", product, model->automatic_modes,
+               model->manual_modes, model->monitored_fans, model->target_fans,
                !!(model->features & RAZER_BLADE_FAN_SELECT));
         if (!model->fan_groups) {
             putchar('-');

@@ -125,6 +125,18 @@ class BladeDriverTests(unittest.TestCase):
     def test_selected_input_and_firmware_preflight_block_invalid_writes(self):
         self.scenario("selected-preflight")
 
+    def test_target_only_control_preserves_global_manual_mode(self):
+        self.scenario("target-only")
+
+    def test_target_only_preflight_blocks_invalid_or_ineligible_writes(self):
+        self.scenario("target-preflight")
+
+    def test_target_only_coupling_restores_global_automatic_mode(self):
+        self.scenario("target-coupled")
+
+    def test_target_only_transport_failure_restores_global_automatic_mode(self):
+        self.scenario("target-error-recovery")
+
     def test_sysfs_group_is_limited_to_supported_product_and_interface(self):
         self.scenario("sysfs-gate")
 
