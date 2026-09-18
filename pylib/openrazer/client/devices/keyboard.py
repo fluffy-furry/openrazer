@@ -94,6 +94,30 @@ class RazerKeyboard(__RazerDevice):
             raise NotImplementedError()
 
     @property
+    def fan_target_ids(self) -> tuple[int, ...]:
+        """Return fan IDs with independent RPM targets in global manual mode."""
+        if self.has('fan_target_control'):
+            return tuple(int(fan_id) for fan_id in self._dbus_interfaces['fan'].getFanTargetIds())
+        else:
+            raise NotImplementedError()
+
+    def set_fan_manual_targets(self, targets: dict[int, int]) -> None:
+        """Set selected RPM targets while all fans remain in manual mode."""
+        if self.has('fan_target_control'):
+            if not isinstance(targets, dict) or not targets:
+                raise ValueError('Fan targets must be a nonempty mapping')
+            checked = {}
+            for fan_id, rpm in targets.items():
+                if isinstance(fan_id, bool) or not isinstance(fan_id, int) or not 0 < fan_id <= 255:
+                    raise ValueError('Invalid fan ID')
+                if isinstance(rpm, bool) or not isinstance(rpm, int) or not 0 < rpm <= 25500 or rpm % 100:
+                    raise ValueError('Invalid fan RPM')
+                checked[fan_id] = rpm
+            self._dbus_interfaces['fan'].setFanManualTargets(checked)
+        else:
+            raise NotImplementedError()
+
+    @property
     def fan_groups(self) -> dict[str, tuple[int, ...]]:
         """Return the model's named fan groups as firmware ID tuples."""
         if self.has('fan_select_control'):

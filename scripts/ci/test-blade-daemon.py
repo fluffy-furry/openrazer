@@ -29,6 +29,8 @@ FAN_METHODS = ('get_fan_state', 'get_fan_rpm', 'get_fan_limits', 'get_fan_config
 FAN_FILES = ('fan_state', 'fan_rpm', 'fan_limits', 'fan_control', 'fan_modes', 'fan_rpm_monitor')
 FAN_SELECT_METHODS = ('get_fan_groups', 'set_fan_manual_fans', 'set_fan_auto_fans')
 FAN_SELECT_FILES = FAN_FILES + ('fan_groups', 'fan_control_select')
+FAN_TARGET_METHODS = ('get_fan_target_ids', 'set_fan_manual_targets')
+FAN_TARGET_FILES = FAN_FILES + ('fan_target_ids', 'fan_control_targets')
 FAN_MODELS = {0x0253, 0x0256, 0x026E, 0x0270, 0x028B, 0x029F, 0x02B8, 0x02C6}
 
 
@@ -94,6 +96,26 @@ class BladePersistenceTests(unittest.TestCase):
                 loaded = self.save_and_read()
                 self.assertFalse(loaded.has_option('BLADE', 'fan_mode'))
 
+    def test_target_preference_survives_only_on_registered_model(self):
+        targets = {'fan_mode': 'targets', 'fan_targets': '2:3000,1:4300', 'fan_performance_mode': '0', 'fan_base_rpm': '2900'}
+        self.daemon._persistence.read_dict({'BLADE': targets})
+        self.daemon._razer_devices[0].dbus.METHODS = keyboards.RazerBladeProEarly2020.METHODS
+        loaded = self.save_and_read()
+        self.assertEqual(dict(loaded['BLADE']), {'fan_mode': 'targets', 'fan_targets': '1:4300,2:3000',
+                                                 'fan_performance_mode': '0', 'fan_base_rpm': '2900'})
+
+    def test_target_preference_requires_valid_baseline(self):
+        self.daemon._razer_devices[0].dbus.METHODS = keyboards.RazerBladeProEarly2020.METHODS
+        for baseline in (None, '0', '2950', '25600', 'bad'):
+            with self.subTest(baseline=baseline):
+                self.daemon._persistence.remove_section('BLADE')
+                values = {'fan_mode': 'targets', 'fan_targets': '1:4300,2:2900', 'fan_performance_mode': '0'}
+                if baseline is not None:
+                    values['fan_base_rpm'] = baseline
+                self.daemon._persistence.read_dict({'BLADE': values})
+                loaded = self.save_and_read()
+                self.assertFalse(loaded.has_option('BLADE', 'fan_mode'))
+
 
 class _FanDevice(RazerDevice):
     USB_VID = 0x1532
@@ -103,6 +125,10 @@ class _FanDevice(RazerDevice):
 
 class _SelectiveFanDevice(_FanDevice):
     METHODS = list(FAN_METHODS + FAN_SELECT_METHODS)
+
+
+class _TargetFanDevice(_FanDevice):
+    METHODS = list(FAN_METHODS + FAN_TARGET_METHODS)
 
 
 class _PlainDevice(RazerDevice):
@@ -122,6 +148,8 @@ class BladeDaemonTests(unittest.TestCase):
             'fan_limits': '2300 2900 4300\n',
             'fan_control': 'untouched',
             'fan_control_select': 'untouched',
+            'fan_control_targets': 'untouched',
+            'fan_target_ids': '1,2\n',
             'fan_groups': 'cpu_gpu 1,2\nbattery 3,4\n',
             'fan_modes': '81 1\n',
             'fan_rpm_monitor': '6\n',
@@ -187,6 +215,40 @@ class BladeDaemonTests(unittest.TestCase):
             self.assertEqual(method.interface, 'razer.device.fan')
             self.assertEqual((method.name, method.in_sig, method.out_sig), signature)
             self.assertEqual(method.required_files, FAN_SELECT_FILES)
+        targets = {'get_fan_target_ids': ('getFanTargetIds', None, 'ay'),
+                   'set_fan_manual_targets': ('setFanManualTargets', 'a{yq}', None)}
+        for name, signature in targets.items():
+            method = getattr(fan, name)
+            self.assertEqual((method.name, method.in_sig, method.out_sig), signature)
+            self.assertEqual(method.required_files, FAN_TARGET_FILES)
+
+    def test_target_getter_setter_and_registration(self):
+        self.assertEqual(fan.get_fan_target_ids(self.device), [1, 2])
+        with patch.object(self.device, '_fan_control') as control:
+            fan.set_fan_manual_targets(self.device, {dbus.Byte(1): dbus.UInt16(4300)})
+            control.set_manual_targets.assert_called_once_with({1: 4300})
+        for value in ('', '1,1\n', '0,2\n', '1,256\n', '1, 2\n', '1,2\n3\n'):
+            with self.subTest(value=value):
+                (self.path / 'fan_target_ids').write_text(value)
+                with self.assertRaises(ValueError):
+                    fan.get_fan_target_ids(self.device)
+        (self.path / 'fan_target_ids').write_text('1,2\n')
+        connection = Mock()
+        connection.list_exported_child_objects.return_value = []
+        plain = self.make_device()
+        self.assertNotIn('getFanTargetIds', plain.Introspect('/org/razer/device/FANTEST123', connection))
+        for missing in ('fan_target_ids', 'fan_control_targets'):
+            with self.subTest(missing=missing):
+                path = self.path / missing
+                value = path.read_text()
+                path.unlink()
+                gated = self.make_device(model=_TargetFanDevice)
+                self.assertNotIn('getFanTargetIds', gated.Introspect('/org/razer/device/FANTEST123', connection))
+                path.write_text(value)
+        gated = self.make_device(model=_TargetFanDevice)
+        xml = gated.Introspect('/org/razer/device/FANTEST123', connection)
+        self.assertIn('getFanTargetIds', xml)
+        self.assertIn('setFanManualTargets', xml)
 
     def test_selective_getter_and_setters_preserve_ids_and_targets(self):
         self.assertEqual(fan.get_fan_groups(self.device), {'cpu_gpu': [1, 2], 'battery': [3, 4]})

@@ -9,6 +9,7 @@ from openrazer_daemon.dbus_services import endpoint
 
 _FAN_FILES = ('fan_state', 'fan_rpm', 'fan_limits', 'fan_control', 'fan_modes', 'fan_rpm_monitor')
 _FAN_SELECT_FILES = _FAN_FILES + ('fan_groups', 'fan_control_select')
+_FAN_TARGET_FILES = _FAN_FILES + ('fan_target_ids', 'fan_control_targets')
 
 
 def _read_fan_rows(device, filename, columns):
@@ -164,3 +165,29 @@ def set_fan_auto_fans(self, ids):
         checked.append(int(fan_id))
         seen.add(int(fan_id))
     self._fan_control.set_auto_fans(tuple(checked))
+
+
+@endpoint('razer.device.fan', 'getFanTargetIds', out_sig='ay', required_files=_FAN_TARGET_FILES)
+def get_fan_target_ids(self):
+    """Get IDs whose RPM target can change independently in global manual mode."""
+    with open(self.get_driver_path('fan_target_ids'), 'r') as driver_file:
+        lines = driver_file.read().splitlines()
+    if len(lines) != 1 or not lines[0]:
+        raise ValueError('Invalid fan target IDs')
+    seen = set()
+    return [_fan_id(value, seen) for value in lines[0].split(',')]
+
+
+@endpoint('razer.device.fan', 'setFanManualTargets', in_sig='a{yq}', required_files=_FAN_TARGET_FILES)
+def set_fan_manual_targets(self, targets):
+    """Set independent targets while keeping every fan in global manual mode."""
+    if not isinstance(targets, dict) or not targets:
+        raise ValueError('Fan targets must be a nonempty mapping')
+    checked = {}
+    for fan_id, rpm in targets.items():
+        if isinstance(fan_id, bool) or not isinstance(fan_id, int) or not 0 < fan_id <= 255:
+            raise ValueError('Invalid fan ID')
+        if isinstance(rpm, bool) or not isinstance(rpm, int) or not 0 < rpm <= 25500 or rpm % 100:
+            raise ValueError('Invalid fan RPM')
+        checked[int(fan_id)] = int(rpm)
+    self._fan_control.set_manual_targets(checked)

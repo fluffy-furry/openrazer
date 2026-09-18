@@ -37,6 +37,9 @@ class FanControl:
         self._selected_targets = {}
         self._selected_owned = {}
         self._selected_expected_modes = {}
+        self._target_targets = {}
+        self._target_owned = {}
+        self._target_base_rpm = None
         self._pending_auto_ids = ()
         self._pending_auto_state = {}
         self._external_note = ''
@@ -57,12 +60,23 @@ class FanControl:
             return status[0], status[1], dict(status[2]), reason
 
     def _write(self, value):
-        with open(self._device.get_driver_path('fan_control'), 'w') as driver_file:
-            driver_file.write(value)
+        self._write_file('fan_control', value)
+
+    def _write_file(self, name, value):
+        payload = value.encode('ascii')
+        descriptor = os.open(self._device.get_driver_path(name), os.O_WRONLY | os.O_TRUNC | os.O_CLOEXEC)
+        try:
+            if os.write(descriptor, payload) != len(payload):
+                raise OSError('Short fan control write')
+        finally:
+            os.close(descriptor)
 
     def _write_selected(self, value):
-        with open(self._device.get_driver_path('fan_control_select'), 'w') as driver_file:
-            driver_file.write(value)
+        self._write_file('fan_control_select', value)
+
+    def _write_targets(self, targets):
+        command = ','.join(f'{fan_id}:{rpm}' for fan_id, rpm in sorted(targets.items()))
+        self._write_file('fan_control_targets', command)
 
     def _fail_selected_isolation(self, reason):
         self._monitor.cancel(reason)
@@ -74,6 +88,9 @@ class FanControl:
         self._selected_targets = {}
         self._selected_owned = {}
         self._selected_expected_modes = {}
+        self._target_targets = {}
+        self._target_owned = {}
+        self._target_base_rpm = None
         self._pending_auto_ids = ()
         self._pending_auto_state = {}
         self._external_note = ''
@@ -127,12 +144,16 @@ class FanControl:
         section = self._device.storage_name
         if not persistence.has_section(section):
             persistence.add_section(section)
-        persistence.set(section, 'fan_mode', 'selective' if self._selected_targets else 'manual' if self._requested_rpm is not None else 'auto')
+        persistence.set(section, 'fan_mode', 'targets' if self._target_targets else 'selective' if self._selected_targets else 'manual' if self._requested_rpm is not None else 'auto')
         persistence.remove_option(section, 'fan_targets')
-        if self._selected_targets:
-            persistence.set(section, 'fan_targets', ','.join(f'{fan_id}:{rpm}' for fan_id, rpm in sorted(self._selected_targets.items())))
+        persistence.remove_option(section, 'fan_base_rpm')
+        if self._target_targets or self._selected_targets:
+            targets = self._target_targets or self._selected_targets
+            persistence.set(section, 'fan_targets', ','.join(f'{fan_id}:{rpm}' for fan_id, rpm in sorted(targets.items())))
             persistence.remove_option(section, 'fan_rpm')
             persistence.set(section, 'fan_performance_mode', str(self._requested_performance))
+            if self._target_targets:
+                persistence.set(section, 'fan_base_rpm', str(self._target_base_rpm))
         elif self._requested_rpm is None:
             persistence.remove_option(section, 'fan_rpm')
             persistence.remove_option(section, 'fan_performance_mode')
@@ -199,6 +220,9 @@ class FanControl:
         self._expected_modes = modes
         self._selected_targets = {}
         self._selected_expected_modes = {}
+        self._target_targets = {}
+        self._target_owned = {}
+        self._target_base_rpm = None
         self._uncertain = False
         self._last_ownership_check = time.monotonic()
         self._external_note = ''
@@ -207,6 +231,110 @@ class FanControl:
     def set_manual(self, rpm):
         with self._lock:
             self._manual(rpm)
+            self._save_preference()
+
+    def _manual_targets(self, targets, restoring=False):
+        if 'set_fan_manual_targets' not in getattr(self._device, 'METHODS', ()):
+            raise RuntimeError('Independent fan targets are not registered for this model')
+        if self._closed:
+            raise RuntimeError('Fan control is closed')
+        if self._sleeping:
+            raise RuntimeError('Manual fan control is unavailable during system sleep')
+        if self._power_monitor is None or self._power_monitor.power != 'ac':
+            raise RuntimeError('Manual fan control requires confirmed AC power')
+        allowed = set(fan.get_fan_target_ids(self._device))
+        if not targets.keys() <= allowed:
+            raise ValueError('Fan ID does not support independent targets')
+        _, manual_modes, monitored_mask = fan.get_fan_config(self._device)
+        minimum, default, maximum = fan.get_fan_limits(self._device)
+        if any(not minimum <= rpm <= maximum for rpm in targets.values()):
+            raise ValueError('Fan RPM is outside the current limits')
+        if not allowed <= {fan_id for fan_id, _, _, _ in fan.get_fan_state(self._device)}:
+            raise RuntimeError('Targetable fan identities are unavailable')
+        if self._owned:
+            ownership = self._ownership()
+            if ownership == 'external':
+                self._relinquish('Fan mode or target changed outside this request')
+                raise RuntimeError('Fan mode or target changed outside this request')
+            if ownership == 'unknown':
+                raise RuntimeError('Could not verify the active fan setting')
+            if ownership == 'auto':
+                self._owned = False
+                self._target_owned = {}
+        rows = fan.get_fan_state(self._device)
+        modes = {fan_id: performance for fan_id, performance, _, _ in rows}
+        if not allowed <= modes.keys():
+            raise RuntimeError('Targetable fan identities are unavailable')
+        if not modes or len(set(modes.values())) != 1 or any(not manual_modes & (1 << mode) for mode in modes.values()):
+            raise RuntimeError('Manual fan control is unavailable in the current performance mode')
+        if restoring and self._requested_performance is not None and set(modes.values()) != {self._requested_performance}:
+            raise RuntimeError('Saved performance mode is no longer active')
+        if not targets.keys() <= modes.keys():
+            raise RuntimeError('Fan identities changed before the manual request')
+        if self._selected_owned:
+            raise RuntimeError('Previous selected fan request must be released first')
+        all_auto = all(mode == 'auto' for _, _, mode, _ in rows)
+        all_manual = all(mode == 'manual' for _, _, mode, _ in rows)
+        if restoring and not all_auto:
+            raise RuntimeError('Another manual fan setting is active; saved control was not restored')
+        if not all_auto and not (all_manual and self._owned and self._ownership() == 'owned'):
+            raise RuntimeError('Another manual fan setting is active')
+        if self._power_monitor.power != 'ac':
+            raise RuntimeError('AC power changed before the manual request')
+        baseline = self._target_base_rpm if restoring or self._target_owned else self._requested_rpm if self._owned else default
+        if not minimum <= baseline <= maximum or baseline % 100:
+            raise ValueError('Fan baseline RPM is outside the current limits')
+        effective = {fan_id: baseline for fan_id in modes} if all_auto else {fan_id: rpm for fan_id, _, _, rpm in rows}
+        effective.update(targets)
+        monitored = tuple(fan_id for fan_id in effective if monitored_mask & (1 << fan_id))
+        if not monitored:
+            raise RuntimeError('Required fan telemetry is unavailable')
+        self._monitor.cancel('Superseded by a target request')
+        self._owned = True
+        self._uncertain = True
+        self._recovery_failed = False
+        self._recovery_attempts = 0
+        try:
+            if all_auto:
+                self._write(str(baseline))
+                initialized = fan.get_fan_state(self._device)
+                if {(fan_id, performance, mode, rpm) for fan_id, performance, mode, rpm in initialized} != {
+                        (fan_id, performance, 'manual', baseline) for fan_id, performance in modes.items()}:
+                    raise RuntimeError('Global manual initialization changed fan state unexpectedly')
+            self._write_targets(targets)
+            after = fan.get_fan_state(self._device)
+            if {(fan_id, performance, mode, rpm) for fan_id, performance, mode, rpm in after} != {
+                    (fan_id, performance, 'manual', effective[fan_id]) for fan_id, performance in modes.items()}:
+                raise RuntimeError('Independent target write changed fan state unexpectedly')
+            if self._power_monitor.power != 'ac':
+                raise RuntimeError('AC power changed during the manual request')
+            monitored_targets = {fan_id: effective[fan_id] for fan_id in monitored}
+            self._monitor.start_targets(monitored_targets, monitored, {fan_id: modes[fan_id] for fan_id in monitored})
+        except Exception:
+            self._automatic('Manual target request failed', 'error')
+            raise
+        self._target_targets = {fan_id: effective[fan_id] for fan_id in allowed}
+        self._target_owned = effective
+        self._target_base_rpm = baseline
+        self._requested_rpm = None
+        self._requested_performance = next(iter(modes.values()))
+        self._expected_modes = modes
+        self._selected_targets = {}
+        self._selected_expected_modes = {}
+        self._uncertain = False
+        self._last_ownership_check = time.monotonic()
+        self._external_note = ''
+        self._policy_status = None
+
+    def set_manual_targets(self, targets):
+        if not isinstance(targets, dict) or not targets:
+            raise ValueError('Fan targets must be a nonempty mapping')
+        if any(isinstance(fan_id, bool) or not isinstance(fan_id, int) or not 0 < fan_id <= 255 for fan_id in targets):
+            raise ValueError('Invalid fan ID')
+        if any(isinstance(rpm, bool) or not isinstance(rpm, int) or not 0 < rpm <= 25500 or rpm % 100 for rpm in targets.values()):
+            raise ValueError('Fan RPM must be a positive multiple of 100')
+        with self._lock:
+            self._manual_targets(dict(targets))
             self._save_preference()
 
     def _manual_fans(self, targets, restoring=False):
@@ -473,6 +601,8 @@ class FanControl:
             self._expected_modes = {}
             self._selected_targets = {}
             self._selected_expected_modes = {}
+            self._target_targets = {}
+            self._target_base_rpm = None
             self._pending_auto_ids = ()
             self._pending_auto_state = {}
             self._external_note = ''
@@ -490,6 +620,7 @@ class FanControl:
                 raise
             self._owned = False
             self._selected_owned = {}
+            self._target_owned = {}
             self._uncertain = False
             self._recovery_failed = False
             self._recovery_attempts = 0
@@ -514,6 +645,7 @@ class FanControl:
                 return
             if ownership == 'auto':
                 self._owned = False
+                self._target_owned = {}
                 return
         if reason != self._recovery_reason or not self._recovery_failed:
             self._recovery_attempts = 0
@@ -523,6 +655,7 @@ class FanControl:
         try:
             self._write('auto')
             self._owned = False
+            self._target_owned = {}
             self._uncertain = False
             self._recovery_failed = False
             self._recovery_attempts = 0
@@ -540,6 +673,11 @@ class FanControl:
             return 'external'
         if all(mode == 'auto' for _, _, mode, _ in state):
             return 'auto'
+        if self._target_owned:
+            if all(performance == self._expected_modes[fan_id] and mode == 'manual' and rpm == self._target_owned[fan_id]
+                   for fan_id, performance, mode, rpm in state):
+                return 'owned'
+            return 'external'
         if all(performance == self._expected_modes[fan_id] and mode == 'manual' and rpm == self._requested_rpm for fan_id, performance, mode, rpm in state):
             return 'owned'
         return 'external'
@@ -552,6 +690,9 @@ class FanControl:
         self._selected_targets = {}
         self._selected_owned = {}
         self._selected_expected_modes = {}
+        self._target_targets = {}
+        self._target_owned = {}
+        self._target_base_rpm = None
         self._pending_auto_ids = ()
         self._pending_auto_state = {}
         self._external_note = ''
@@ -560,6 +701,16 @@ class FanControl:
         self._save_preference()
 
     def _restore_request(self):
+        if self._target_targets:
+            if self._sleeping or self._closed or self._owned:
+                return
+            try:
+                self._manual_targets(dict(self._target_targets), restoring=True)
+            except Exception as error:
+                if not self._recovery_failed and self._target_targets:
+                    self._policy_status = ('suspended', self._target_value(self._target_targets), self._monitor.status[2], str(error))
+                self._device.logger.warning('Manual fan targets were not restored: %s', error)
+            return
         if self._selected_targets:
             if self._sleeping or self._closed or self._selected_owned:
                 return
@@ -652,6 +803,45 @@ class FanControl:
             persistence = self._device.persistence
             section = self._device.storage_name
             saved_mode = persistence.get(section, 'fan_mode', fallback='auto')
+            if saved_mode == 'targets':
+                if 'set_fan_manual_targets' not in getattr(self._device, 'METHODS', ()):
+                    return
+                try:
+                    available = all(os.path.isfile(self._device.get_driver_path(name)) for name in ('fan_target_ids', 'fan_control_targets'))
+                except (OSError, ValueError):
+                    return
+                if not available:
+                    return
+                try:
+                    serialized = persistence.get(section, 'fan_targets')
+                    entries = serialized.split(',')
+                    if not entries or any(not entry or ':' not in entry for entry in entries):
+                        raise ValueError('Invalid saved fan targets')
+                    targets = {}
+                    for entry in entries:
+                        fan_id_text, rpm_text = entry.split(':', 1)
+                        if not fan_id_text.isascii() or not fan_id_text.isdecimal() or not rpm_text.isascii() or not rpm_text.isdecimal():
+                            raise ValueError('Invalid saved fan targets')
+                        fan_id, rpm = int(fan_id_text), int(rpm_text)
+                        if not 0 < fan_id <= 255 or fan_id in targets or not 0 < rpm <= 25500 or rpm % 100:
+                            raise ValueError('Invalid saved fan targets')
+                        targets[fan_id] = rpm
+                    performance = persistence.getint(section, 'fan_performance_mode')
+                    if not 0 <= performance < 32:
+                        raise ValueError('Invalid saved fan performance mode')
+                    baseline = persistence.getint(section, 'fan_base_rpm')
+                    if not 0 < baseline <= 25500 or baseline % 100:
+                        raise ValueError('Invalid saved fan baseline RPM')
+                except (ValueError, configparser.Error) as error:
+                    self._device.logger.warning('Ignoring invalid fan target preference: %s', error)
+                    return
+                self._target_targets = targets
+                self._target_base_rpm = baseline
+                self._requested_performance = performance
+                self._policy_status = ('suspended', self._target_value(targets), {}, 'Waiting for AC power')
+                if self._power == 'ac':
+                    self._restore_request()
+                return
             if saved_mode == 'selective':
                 if 'set_fan_manual_fans' not in getattr(self._device, 'METHODS', ()):
                     return

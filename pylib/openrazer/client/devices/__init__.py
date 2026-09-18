@@ -68,6 +68,8 @@ class RazerDevice(object):
             'fan_control': self._has_feature('razer.device.fan', ('getFanState', 'getFanRPM', 'getFanLimits', 'getFanConfig', 'getFanStatus', 'setFanAuto', 'setFanManual')),
             'fan_select_control': self._has_feature('razer.device.fan', ('getFanState', 'getFanRPM', 'getFanLimits', 'getFanConfig', 'getFanStatus', 'setFanAuto', 'setFanManual',
                                                                       'getFanGroups', 'setFanManualFans', 'setFanAutoFans')),
+            'fan_target_control': self._has_feature('razer.device.fan', ('getFanState', 'getFanRPM', 'getFanLimits', 'getFanConfig', 'getFanStatus', 'setFanAuto', 'setFanManual',
+                                                                      'getFanTargetIds', 'setFanManualTargets')),
 
             'poll_rate': self._has_feature('razer.device.misc', ('getPollRate', 'setPollRate')),
             'supported_poll_rates': self._has_feature('razer.device.misc', 'getSupportedPollRates'),
@@ -250,7 +252,7 @@ class RazerDevice(object):
             self._dbus_interfaces['keyswitch_optimization'] = _dbus.Interface(self._dbus, "razer.device.misc.keyswitchoptimization")
         if self.has('macro_mode_led'):
             self._dbus_interfaces['macro_mode_led'] = _dbus.Interface(self._dbus, "razer.device.led.macromode")
-        if self.has('fan_control') or self.has('fan_select_control'):
+        if self.has('fan_control') or self.has('fan_select_control') or self.has('fan_target_control'):
             self._dbus_interfaces['fan'] = _dbus.Interface(self._dbus, "razer.device.fan")
         if self.has('lighting_profile_led_red') or self.has('lighting_profile_led_green') or self.has('lighting_profile_led_blue'):
             self._dbus_interfaces['profile_led'] = _dbus.Interface(self._dbus, "razer.device.lighting.profile_led")

@@ -1826,7 +1826,8 @@ class RazerBladeProEarly2020(_RippleKeyboard):
     METHODS = ['get_device_type_keyboard', 'set_wave_effect', 'set_static_effect', 'set_spectrum_effect',
                'set_reactive_effect', 'set_none_effect', 'set_custom_effect', 'set_key_row',
                'set_ripple_effect', 'set_ripple_effect_random_colour',
-               'get_fan_state', 'get_fan_rpm', 'get_fan_limits', 'set_fan_auto', 'set_fan_manual', 'get_fan_config', 'get_fan_status']
+               'get_fan_state', 'get_fan_rpm', 'get_fan_limits', 'set_fan_auto', 'set_fan_manual', 'get_fan_config', 'get_fan_status',
+               'get_fan_target_ids', 'set_fan_manual_targets']
 
     DEVICE_IMAGE = "https://assets.razerzone.com/eeimages/support/products/1654/blade-pro-17-2020-2.png"
 

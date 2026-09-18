@@ -17,9 +17,10 @@ from openrazer.client.devices.keyboard import RazerKeyboard
 class BladeClientTests(unittest.TestCase):
     METHODS = ('getFanState', 'getFanRPM', 'getFanLimits', 'getFanConfig', 'getFanStatus', 'setFanAuto', 'setFanManual')
     SELECT_METHODS = ('getFanGroups', 'setFanManualFans', 'setFanAutoFans')
+    TARGET_METHODS = ('getFanTargetIds', 'setFanManualTargets')
 
     def setUp(self):
-        self.fan = Mock(spec=self.METHODS + self.SELECT_METHODS)
+        self.fan = Mock(spec=self.METHODS + self.SELECT_METHODS + self.TARGET_METHODS)
         self.misc = Mock()
         self.misc.getDeviceName.return_value = 'Razer Blade'
         self.misc.getDeviceType.return_value = 'keyboard'
@@ -56,6 +57,34 @@ class BladeClientTests(unittest.TestCase):
 
     def selective_device(self):
         return self.device(self.METHODS + self.SELECT_METHODS)
+
+    def target_device(self):
+        return self.device(self.METHODS + self.TARGET_METHODS)
+
+    def test_target_capability_requires_complete_interface(self):
+        device = self.target_device()
+        self.assertTrue(device.has('fan_target_control'))
+        self.assertFalse(device.has('fan_select_control'))
+        for missing in self.METHODS + self.TARGET_METHODS:
+            with self.subTest(missing=missing):
+                device = self.device(tuple(method for method in self.METHODS + self.TARGET_METHODS if method != missing))
+                self.assertFalse(device.has('fan_target_control'))
+                with self.assertRaises(NotImplementedError):
+                    _ = device.fan_target_ids
+                with self.assertRaises(NotImplementedError):
+                    device.set_fan_manual_targets({1: 4300})
+
+    def test_target_ids_and_manual_targets(self):
+        device = self.target_device()
+        self.fan.getFanTargetIds.return_value = dbus.Array([dbus.Byte(1), dbus.Byte(2)], signature='y')
+        self.assertEqual(device.fan_target_ids, (1, 2))
+        device.set_fan_manual_targets({1: 4300})
+        self.assertEqual(self.fan.mock_calls, [call.getFanTargetIds(), call.setFanManualTargets({1: 4300})])
+        self.fan.reset_mock()
+        for targets in ({}, {1: 2350}, {True: 2900}, {1: True}, {'1': 2900}):
+            with self.subTest(targets=targets), self.assertRaises(ValueError):
+                device.set_fan_manual_targets(targets)
+        self.fan.setFanManualTargets.assert_not_called()
 
     def test_complete_interface_enables_capability_without_fan_io(self):
         device = self.device()

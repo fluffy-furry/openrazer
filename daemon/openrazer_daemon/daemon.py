@@ -344,7 +344,7 @@ class RazerDaemon(DBusService):
                     else:
                         if 0 < rpm <= 25500 and rpm % 100 == 0 and 0 <= performance < 32:
                             fan_preference = {'fan_mode': mode, 'fan_rpm': str(rpm), 'fan_performance_mode': str(performance)}
-                elif mode == 'selective' and 'set_fan_manual_fans' in device.dbus.METHODS:
+                elif mode in ('selective', 'targets') and ('set_fan_manual_fans' if mode == 'selective' else 'set_fan_manual_targets') in device.dbus.METHODS:
                     try:
                         performance = self._persistence.getint(section, 'fan_performance_mode')
                         serialized = self._persistence.get(section, 'fan_targets')
@@ -357,12 +357,18 @@ class RazerDaemon(DBusService):
                             if not 0 < fan_id <= 255 or fan_id in targets or not 0 < rpm <= 25500 or rpm % 100:
                                 raise ValueError('Invalid selected fan target')
                             targets[fan_id] = rpm
+                        if mode == 'targets':
+                            baseline = self._persistence.getint(section, 'fan_base_rpm')
+                            if not 0 < baseline <= 25500 or baseline % 100:
+                                raise ValueError('Invalid fan baseline RPM')
                     except (ValueError, configparser.Error):
                         pass
                     else:
                         if targets and 0 <= performance < 32:
                             fan_preference = {'fan_mode': mode, 'fan_targets': ','.join(f'{fan_id}:{rpm}' for fan_id, rpm in sorted(targets.items())),
                                               'fan_performance_mode': str(performance)}
+                            if mode == 'targets':
+                                fan_preference['fan_base_rpm'] = str(baseline)
             self._persistence[section] = fan_preference
             if 'set_dpi_xy' in device.dbus.METHODS or 'set_dpi_xy_byte' in device.dbus.METHODS:
                 dpi_x = int(device.dbus.dpi[0])
