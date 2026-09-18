@@ -23,15 +23,23 @@ class BladeControlTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.path = Path(directory.name)
         self.state('auto', 0)
-        for name, value in {'fan_modes': '81 1', 'fan_rpm_monitor': '6', 'fan_limits': '2300 2900 4300', 'fan_rpm': '1 2900\n2 2900\n'}.items():
+        for name, value in {'fan_modes': '81 1', 'fan_rpm_monitor': '6', 'fan_limits': '2300 2900 4300', 'fan_rpm': '1 2900\n2 2900\n',
+                            'fan_groups': 'cpu_gpu 1,2\nbattery 3,4\n', 'fan_control_select': ''}.items():
             (self.path / name).write_text(value)
         config = configparser.ConfigParser()
         config.read_dict({'Startup': {'restore_persistence': 'false'}})
         self.device = SimpleNamespace(config=config, persistence=configparser.ConfigParser(), storage_name='FANCONTROL',
-                                      logger=logging.getLogger('fan-control-test'), get_driver_path=lambda name: str(self.path / name), disable_persistence=False)
+                                      logger=logging.getLogger('fan-control-test'), get_driver_path=lambda name: str(self.path / name), disable_persistence=False,
+                                      METHODS=['set_fan_manual_fans'])
         self.monitor = Mock()
         self.monitor.status = ('idle', 0, {}, '')
         self.monitor.start.side_effect = lambda rpm, *_: setattr(self.monitor, 'status', ('settling', rpm, {}, ''))
+
+        def start_targets(targets, monitored, _modes):
+            target = next(iter(targets.values())) if len(set(targets.values())) == 1 else 0
+            self.monitor.status = ('settling' if monitored else 'accepted', target, {}, '')
+
+        self.monitor.start_targets.side_effect = start_targets
         self.power = SimpleNamespace(power='ac', register=lambda control: control.update_power(self.power.power), unregister=Mock())
         with patch('openrazer_daemon.misc.fan_control.FanMonitor', return_value=self.monitor):
             self.control = FanControl(self.device)
@@ -39,6 +47,8 @@ class BladeControlTests(unittest.TestCase):
         self.write_error = None
         self.after_write = None
         self.control._write = self.write
+        self.control._write_selected = self.write_selected
+        self.selected_writes = []
         self.addCleanup(self.control.close)
         self.control.attach_power(self.power)
 
@@ -53,6 +63,28 @@ class BladeControlTests(unittest.TestCase):
             self.state('auto', 0)
         else:
             self.state('manual', int(value))
+        if self.after_write:
+            self.after_write(value)
+
+    def write_selected(self, value):
+        self.selected_writes.append(value)
+        if self.write_error is not None:
+            raise self.write_error
+        rows = {}
+        for line in (self.path / 'fan_state').read_text().splitlines():
+            fan_id, performance, mode, rpm = line.split()
+            rows[int(fan_id)] = (int(performance), mode, int(rpm))
+        command, selected = value.split(' ', 1)
+        if command == 'auto':
+            for text in selected.split(','):
+                fan_id = int(text)
+                rows[fan_id] = (rows[fan_id][0], 'auto', 0)
+        else:
+            for entry in selected.split(','):
+                fan_id_text, rpm_text = entry.split(':')
+                fan_id = int(fan_id_text)
+                rows[fan_id] = (rows[fan_id][0], 'manual', int(rpm_text))
+        (self.path / 'fan_state').write_text(''.join(f'{fan_id} {performance} {mode} {rpm}\n' for fan_id, (performance, mode, rpm) in sorted(rows.items())))
         if self.after_write:
             self.after_write(value)
 
@@ -308,6 +340,166 @@ class BladeControlTests(unittest.TestCase):
         self.assertEqual(self.writes, ['2900', 'auto', '2900', 'auto'])
         self.assertEqual(self.control.status[0], 'error')
         self.assertIn('automatic restoration failed', self.control.status[3])
+
+    def test_selected_manual_replaces_only_prior_owned_ids(self):
+        self.control.set_manual_fans({1: 2900, 3: 3000})
+        self.assertEqual(self.selected_writes, ['manual 1:2900,3:3000'])
+        self.monitor.start_targets.assert_called_once_with({1: 2900, 3: 3000}, (1,), {1: 0, 3: 0})
+        self.assertEqual(self.device.persistence.get('FANCONTROL', 'fan_mode'), 'selective')
+        self.assertEqual(self.device.persistence.get('FANCONTROL', 'fan_targets'), '1:2900,3:3000')
+        self.assertEqual(self.control.status[1], 0)
+        self.control.set_manual_fans({2: 3100})
+        self.assertEqual(self.selected_writes, ['manual 1:2900,3:3000', 'auto 1,3', 'manual 2:3100'])
+        self.assertEqual((self.path / 'fan_state').read_text(), '1 0 auto 0\n2 0 manual 3100\n3 0 auto 0\n4 0 auto 0\n')
+
+    def test_selected_invalid_request_leaves_existing_request_untouched(self):
+        self.control.set_manual_fans({1: 2900})
+        for targets in ({}, {1: 2950}, {0: 2900}, {5: 2900}, {1: 4400}, {True: 2900}):
+            with self.subTest(targets=targets), self.assertRaises(ValueError):
+                self.control.set_manual_fans(targets)
+        self.assertEqual(self.selected_writes, ['manual 1:2900'])
+
+    def test_selected_mode_policy_ignores_unselected_performance(self):
+        (self.path / 'fan_modes').write_text('85 5')
+        (self.path / 'fan_state').write_text('1 0 auto 0\n2 2 auto 0\n3 2 auto 0\n4 2 auto 0\n')
+        self.control.set_manual_fans({1: 2900})
+        self.assertEqual(self.selected_writes, ['manual 1:2900'])
+        with self.assertRaises(RuntimeError):
+            self.control.set_manual_fans({1: 2900, 2: 2900})
+        self.assertEqual(self.selected_writes, ['manual 1:2900'])
+
+    def test_selected_auto_and_shutdown_touch_only_owned_ids(self):
+        self.control.set_manual_fans({1: 2900, 3: 3000})
+        self.control.set_auto_fans((3,))
+        self.assertEqual(self.control.status[0], 'settling')
+        self.monitor.start_targets.assert_called_with({1: 2900}, (1,), {1: 0})
+        self.control.close()
+        self.assertEqual(self.selected_writes, ['manual 1:2900,3:3000', 'auto 3', 'auto 1'])
+        self.assertEqual(self.writes, [])
+        self.assertEqual((self.path / 'fan_state').read_text(), '1 0 auto 0\n2 0 auto 0\n3 0 auto 0\n4 0 auto 0\n')
+
+    def test_selected_power_and_sleep_restore_selected_targets(self):
+        self.control.set_manual_fans({1: 2900, 3: 3000})
+        self.power.power = 'battery'
+        self.control.update_power('battery')
+        self.power.power = 'ac'
+        self.control.update_power('ac')
+        self.control.prepare_for_sleep(True)
+        self.control.prepare_for_sleep(False)
+        self.assertEqual(self.selected_writes, ['manual 1:2900,3:3000', 'auto 1,3', 'manual 1:2900,3:3000',
+                                                'auto 1,3', 'manual 1:2900,3:3000'])
+        self.assertEqual(self.writes, [])
+
+    def test_selected_unmonitored_fan_is_accepted_without_rpm_claim(self):
+        self.control.set_manual_fans({3: 2900})
+        self.assertEqual(self.control.status[0], 'accepted')
+        self.monitor.start_targets.assert_called_once_with({3: 2900}, (), {3: 0})
+
+    def test_selected_external_change_is_not_reset(self):
+        self.control.set_manual_fans({1: 2900, 3: 3000})
+        (self.path / 'fan_state').write_text('1 0 manual 3400\n2 0 auto 0\n3 0 manual 3000\n4 0 auto 0\n')
+        self.control.close()
+        self.assertEqual(self.selected_writes, ['manual 1:2900,3:3000', 'auto 3'])
+
+    def test_selected_restore_retry_never_touches_external_id(self):
+        self.control.set_manual_fans({1: 2900, 3: 3000})
+        (self.path / 'fan_state').write_text('1 0 manual 3400\n2 0 auto 0\n3 0 manual 3000\n4 0 auto 0\n')
+        self.write_error = OSError(errno.EBUSY, 'busy')
+        self.power.power = 'battery'
+        self.control.update_power('battery')
+        self.assertEqual(self.control._selected_owned, {3: 3000})
+        self.write_error = None
+        self.control.check_status()
+        self.assertEqual(self.selected_writes, ['manual 1:2900,3:3000', 'auto 3', 'auto 3'])
+        self.assertEqual(self.control._selected_owned, {})
+
+    def test_failed_selected_auto_retries_only_requested_id(self):
+        self.control.set_manual_fans({1: 2900, 3: 3000})
+        self.write_error = OSError(errno.EBUSY, 'busy')
+        with self.assertRaises(OSError):
+            self.control.set_auto_fans((3,))
+        self.write_error = None
+        self.control.check_status()
+        self.control.close()
+        self.assertEqual(self.selected_writes, ['manual 1:2900,3:3000', 'auto 3', 'auto 3', 'auto 1'])
+
+    def test_failed_selected_auto_does_not_restore_external_change(self):
+        self.control.set_manual_fans({1: 2900, 3: 3000})
+        self.write_error = OSError(errno.EBUSY, 'busy')
+        with self.assertRaises(OSError):
+            self.control.set_auto_fans((3,))
+        self.write_error = None
+        (self.path / 'fan_state').write_text('1 0 manual 3400\n2 0 auto 0\n3 0 manual 3000\n4 0 auto 0\n')
+        self.power.power = 'battery'
+        self.control.update_power('battery')
+        self.assertEqual(self.selected_writes, ['manual 1:2900,3:3000', 'auto 3', 'auto 3'])
+
+    def test_failed_unowned_selected_auto_accepts_already_auto(self):
+        self.write_error = OSError(errno.EBUSY, 'busy')
+        with self.assertRaises(OSError):
+            self.control.set_auto_fans((3,))
+        self.write_error = None
+        self.control.check_status()
+        self.assertEqual(self.selected_writes, ['auto 3'])
+        self.assertEqual(self.control.status[0], 'auto')
+
+    def test_failed_selected_auto_retry_does_not_clobber_same_id_takeover(self):
+        self.control.set_manual_fans({1: 2900})
+        self.write_error = OSError(errno.EBUSY, 'busy')
+        with self.assertRaises(OSError):
+            self.control.set_auto_fans((1,))
+        self.write_error = None
+        (self.path / 'fan_state').write_text('1 0 manual 3400\n2 0 auto 0\n3 0 auto 0\n4 0 auto 0\n')
+        self.control.check_status()
+        self.assertEqual(self.selected_writes, ['manual 1:2900', 'auto 1'])
+        self.assertEqual(self.control.status[0], 'cancelled')
+        self.assertIn('IDs 1', self.control.status[3])
+        self.assertEqual(self.control._selected_owned, {})
+        self.assertEqual(self.device.persistence.get('FANCONTROL', 'fan_mode'), 'auto')
+
+    def test_failed_selected_auto_preserves_takeover_reason_with_remaining_monitor(self):
+        self.control.set_manual_fans({1: 2900, 3: 3000})
+        self.write_error = OSError(errno.EBUSY, 'busy')
+        with self.assertRaises(OSError):
+            self.control.set_auto_fans((3,))
+        self.write_error = None
+        (self.path / 'fan_state').write_text('1 0 manual 2900\n2 0 auto 0\n3 0 manual 3400\n4 0 auto 0\n')
+        self.control.check_status()
+        self.assertEqual(self.selected_writes, ['manual 1:2900,3:3000', 'auto 3'])
+        self.assertEqual(self.control.status[0], 'settling')
+        self.assertIn('IDs 3', self.control.status[3])
+        self.assertEqual(self.control._selected_owned, {1: 2900})
+
+    def test_failed_selected_auto_retry_waits_for_readable_state(self):
+        self.control.set_manual_fans({1: 2900})
+        self.write_error = OSError(errno.EBUSY, 'busy')
+        with self.assertRaises(OSError):
+            self.control.set_auto_fans((1,))
+        self.write_error = None
+        (self.path / 'fan_state').unlink()
+        self.control.check_status()
+        self.assertEqual(self.selected_writes, ['manual 1:2900', 'auto 1'])
+        self.assertEqual(self.control.status[0], 'error')
+        self.state('manual', 2900)
+        self.control.check_status()
+        self.assertEqual(self.selected_writes, ['manual 1:2900', 'auto 1', 'auto 1'])
+        self.assertEqual(self.control.status[0], 'auto')
+
+    def test_selected_saved_intent_requires_registered_files_and_opt_in(self):
+        self.device.persistence.read_dict({'FANCONTROL': {'fan_mode': 'selective', 'fan_targets': '1:2900,3:3000', 'fan_performance_mode': '0'}})
+        self.control.restore_preferences()
+        self.assertEqual(self.selected_writes, [])
+        self.device.config.set('Startup', 'restore_persistence', 'true')
+        self.device.METHODS = []
+        self.control.restore_preferences()
+        self.assertEqual(self.selected_writes, [])
+        self.device.METHODS = ['set_fan_manual_fans']
+        (self.path / 'fan_control_select').unlink()
+        self.control.restore_preferences()
+        self.assertEqual(self.selected_writes, [])
+        (self.path / 'fan_control_select').write_text('')
+        self.control.restore_preferences()
+        self.assertEqual(self.selected_writes, ['manual 1:2900,3:3000'])
 
 
 if __name__ == '__main__':

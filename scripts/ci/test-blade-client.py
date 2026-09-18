@@ -16,9 +16,10 @@ from openrazer.client.devices.keyboard import RazerKeyboard
 
 class BladeClientTests(unittest.TestCase):
     METHODS = ('getFanState', 'getFanRPM', 'getFanLimits', 'getFanConfig', 'getFanStatus', 'setFanAuto', 'setFanManual')
+    SELECT_METHODS = ('getFanGroups', 'setFanManualFans', 'setFanAutoFans')
 
     def setUp(self):
-        self.fan = Mock(spec=self.METHODS)
+        self.fan = Mock(spec=self.METHODS + self.SELECT_METHODS)
         self.misc = Mock()
         self.misc.getDeviceName.return_value = 'Razer Blade'
         self.misc.getDeviceType.return_value = 'keyboard'
@@ -53,9 +54,13 @@ class BladeClientTests(unittest.TestCase):
         self.introspection.Introspect.return_value = ElementTree.tostring(root, encoding='unicode')
         return RazerKeyboard('TESTSERIAL')
 
+    def selective_device(self):
+        return self.device(self.METHODS + self.SELECT_METHODS)
+
     def test_complete_interface_enables_capability_without_fan_io(self):
         device = self.device()
         self.assertTrue(device.has('fan_control'))
+        self.assertFalse(device.has('fan_select_control'))
         self.assertIn(call(self.proxy, 'razer.device.fan'), self.interface_factory.call_args_list)
         self.assertEqual(self.fan.mock_calls, [])
 
@@ -83,6 +88,61 @@ class BladeClientTests(unittest.TestCase):
                 with self.assertRaises(NotImplementedError):
                     device.set_fan_manual(2900)
                 self.assertEqual(self.fan.mock_calls, [])
+
+    def test_selective_capability_requires_every_method(self):
+        device = self.selective_device()
+        self.assertTrue(device.has('fan_control'))
+        self.assertTrue(device.has('fan_select_control'))
+        self.assertEqual(self.fan.mock_calls, [])
+        for missing in self.METHODS + self.SELECT_METHODS:
+            with self.subTest(missing=missing):
+                device = self.device(tuple(method for method in self.METHODS + self.SELECT_METHODS if method != missing))
+                self.assertFalse(device.has('fan_select_control'))
+                with self.assertRaises(NotImplementedError):
+                    _ = device.fan_groups
+                with self.assertRaises(NotImplementedError):
+                    device.set_fan_manual_fans({1: 2900})
+                with self.assertRaises(NotImplementedError):
+                    device.set_fan_auto_fans((1,))
+
+    def test_selective_groups_and_exact_targets(self):
+        device = self.selective_device()
+        self.fan.getFanGroups.return_value = dbus.Dictionary({dbus.String('cpu_gpu'): dbus.Array([dbus.Byte(1), dbus.Byte(2)], signature='y'),
+                                                               dbus.String('battery'): dbus.Array([dbus.Byte(3), dbus.Byte(4)], signature='y')}, signature='say')
+        groups = device.fan_groups
+        self.assertEqual(groups, {'cpu_gpu': (1, 2), 'battery': (3, 4)})
+        self.assertIs(type(groups), dict)
+        self.assertTrue(all(type(name) is str and type(ids) is tuple and all(type(fan_id) is int for fan_id in ids)
+                            for name, ids in groups.items()))
+        device.set_fan_manual_fans({1: 2900, 2: 3000})
+        device.set_fan_auto_fans((2, 1))
+        self.assertEqual(self.fan.mock_calls, [call.getFanGroups(), call.setFanManualFans({1: 2900, 2: 3000}), call.setFanAutoFans([2, 1])])
+
+    def test_group_methods_resolve_current_state_before_writing(self):
+        device = self.selective_device()
+        self.fan.getFanGroups.return_value = {'cpu_gpu': (1, 2), 'battery': (3, 4)}
+        self.fan.getFanState.return_value = [(1, 0, 'auto', 0), (2, 0, 'auto', 0), (3, 0, 'auto', 0), (4, 0, 'auto', 0)]
+        device.set_fan_group_manual('cpu_gpu', 2900)
+        device.set_fan_group_auto('battery')
+        self.assertEqual(self.fan.mock_calls, [call.getFanGroups(), call.getFanState(), call.setFanManualFans({1: 2900, 2: 2900}),
+                                               call.getFanGroups(), call.getFanState(), call.setFanAutoFans([3, 4])])
+        self.fan.reset_mock()
+        self.fan.getFanState.return_value = [(1, 0, 'auto', 0)]
+        with self.assertRaises(ValueError):
+            device.set_fan_group_manual('cpu_gpu', 2900)
+        with self.assertRaises(ValueError):
+            device.set_fan_group_auto('battery')
+        self.assertFalse(any(entry[0].startswith('setFan') for entry in self.fan.mock_calls))
+
+    def test_invalid_selective_arguments_do_not_contact_daemon(self):
+        device = self.selective_device()
+        for targets in ({}, {0: 2900}, {1: 2350}, {True: 2900}, {1: True}, {'1': 2900}, {1: 25600}):
+            with self.subTest(targets=targets), self.assertRaises(ValueError):
+                device.set_fan_manual_fans(targets)
+        for ids in ((), (0,), (1, 1), (True,), ('1',), (256,)):
+            with self.subTest(ids=ids), self.assertRaises(ValueError):
+                device.set_fan_auto_fans(ids)
+        self.assertEqual(self.fan.mock_calls, [])
 
     def test_state_converts_dbus_values_to_native_types(self):
         device = self.device()
@@ -168,7 +228,8 @@ class BladeClientTests(unittest.TestCase):
 
     def test_status_keeps_controller_phases_and_retained_target(self):
         device = self.device()
-        for phase in ('idle', 'auto', 'suspended', 'settling', 'reached', 'timeout', 'error', 'cancelled'):
+        for phase in ('idle', 'auto', 'suspended', 'settling', 'reached', 'timeout',
+                      'partially_reached', 'partially_timeout', 'accepted', 'error', 'cancelled'):
             with self.subTest(phase=phase):
                 self.fan.reset_mock()
                 self.fan.getFanStatus.return_value = (dbus.String(phase), dbus.UInt16(2900), dbus.Dictionary({}, signature='yq'), dbus.String('Current reason'))

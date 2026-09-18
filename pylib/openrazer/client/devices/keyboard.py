@@ -55,9 +55,13 @@ class RazerKeyboard(__RazerDevice):
     def fan_status(self) -> tuple[str, int, dict[int, int], str]:
         """Return cached phase, requested RPM, last measured RPM and detail.
 
-        Phases include idle, auto, suspended, settling, reached, timeout, error
-        and cancelled. The requested RPM may remain while battery power forces
-        automatic control. Timeout does not establish a stalled fan.
+        Phases include idle, auto, suspended, settling, reached, timeout,
+        partially_reached, partially_timeout, accepted, error and cancelled.
+        A mixed-target request reports target zero; its per-fan targets remain
+        in fan_state. Accepted means no selected fan has registered RPM
+        telemetry. Partial phases report only monitored fans' settling result.
+        The requested RPM may remain while battery power forces automatic
+        control. Timeout does not establish a stalled fan.
         """
         if self.has('fan_control'):
             phase, target, current, reason = self._dbus_interfaces['fan'].getFanStatus()
@@ -88,6 +92,69 @@ class RazerKeyboard(__RazerDevice):
             self._dbus_interfaces['fan'].setFanManual(rpm)
         else:
             raise NotImplementedError()
+
+    @property
+    def fan_groups(self) -> dict[str, tuple[int, ...]]:
+        """Return the model's named fan groups as firmware ID tuples."""
+        if self.has('fan_select_control'):
+            return {str(name): tuple(int(fan_id) for fan_id in ids)
+                    for name, ids in self._dbus_interfaces['fan'].getFanGroups().items()}
+        else:
+            raise NotImplementedError()
+
+    def set_fan_manual_fans(self, targets: dict[int, int]) -> None:
+        """Set selected fan IDs to manual RPM targets in steps of 100."""
+        if self.has('fan_select_control'):
+            if not isinstance(targets, dict) or not targets:
+                raise ValueError('Fan targets must be a nonempty mapping')
+            checked = {}
+            for fan_id, rpm in targets.items():
+                if isinstance(fan_id, bool) or not isinstance(fan_id, int) or not 0 < fan_id <= 255:
+                    raise ValueError('Invalid fan ID')
+                if isinstance(rpm, bool) or not isinstance(rpm, int) or not 0 < rpm <= 25500 or rpm % 100:
+                    raise ValueError('Invalid fan RPM')
+                checked[fan_id] = rpm
+            self._dbus_interfaces['fan'].setFanManualFans(checked)
+        else:
+            raise NotImplementedError()
+
+    def set_fan_auto_fans(self, ids: tuple[int, ...]) -> None:
+        """Return selected fan IDs to automatic control."""
+        if self.has('fan_select_control'):
+            if not isinstance(ids, (list, tuple)) or not ids:
+                raise ValueError('Fan IDs must be a nonempty sequence')
+            checked = []
+            seen = set()
+            for fan_id in ids:
+                if isinstance(fan_id, bool) or not isinstance(fan_id, int) or not 0 < fan_id <= 255 or fan_id in seen:
+                    raise ValueError('Invalid or duplicate fan ID')
+                checked.append(fan_id)
+                seen.add(fan_id)
+            self._dbus_interfaces['fan'].setFanAutoFans(checked)
+        else:
+            raise NotImplementedError()
+
+    def set_fan_group_manual(self, name: str, rpm: int) -> None:
+        """Set one registered fan group to a common manual RPM."""
+        if not self.has('fan_select_control'):
+            raise NotImplementedError()
+        groups = self.fan_groups
+        if name not in groups:
+            raise ValueError('Unknown fan group')
+        if not set(groups[name]) <= {fan_id for fan_id, _, _, _ in self.fan_state}:
+            raise ValueError('Fan group IDs are absent from current state')
+        self.set_fan_manual_fans({fan_id: rpm for fan_id in groups[name]})
+
+    def set_fan_group_auto(self, name: str) -> None:
+        """Return one registered fan group to automatic control."""
+        if not self.has('fan_select_control'):
+            raise NotImplementedError()
+        groups = self.fan_groups
+        if name not in groups:
+            raise ValueError('Unknown fan group')
+        if not set(groups[name]) <= {fan_id for fan_id, _, _, _ in self.fan_state}:
+            raise ValueError('Fan group IDs are absent from current state')
+        self.set_fan_auto_fans(groups[name])
 
     @property
     def game_mode_led(self) -> bool:

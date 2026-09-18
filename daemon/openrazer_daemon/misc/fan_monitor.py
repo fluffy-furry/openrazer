@@ -36,25 +36,52 @@ class FanMonitor:
 
     def start(self, target, monitored_ids, expected_modes):
         """Monitor an accepted manual request and its expected fan modes."""
-        monitored_ids = tuple(monitored_ids)
-        expected_modes = dict(expected_modes)
         if isinstance(target, bool) or not isinstance(target, int) or not 0 < target <= 25500 or target % 100:
             raise ValueError('Invalid fan target RPM')
-        if not monitored_ids or len(set(monitored_ids)) != len(monitored_ids) or not set(monitored_ids) <= expected_modes.keys():
+        monitored_ids = tuple(monitored_ids)
+        if not monitored_ids:
+            raise ValueError('Invalid monitored fan IDs')
+        self._start({fan_id: target for fan_id in expected_modes}, monitored_ids, expected_modes, target, False)
+
+    def start_targets(self, targets, monitored_ids, expected_modes):
+        """Observe selected fans; an unmonitored request remains unverified."""
+        targets = dict(targets)
+        if not targets:
+            raise ValueError('Invalid selected fan targets')
+        target = next(iter(targets.values())) if len(set(targets.values())) == 1 else 0
+        self._start(targets, monitored_ids, expected_modes, target, True)
+
+    def _start(self, targets, monitored_ids, expected_modes, target, selective):
+        targets = dict(targets)
+        monitored_ids = tuple(monitored_ids)
+        expected_modes = dict(expected_modes)
+        if not targets or targets.keys() != expected_modes.keys():
+            raise ValueError('Invalid selected fan targets')
+        if len(set(monitored_ids)) != len(monitored_ids) or not set(monitored_ids) <= targets.keys():
             raise ValueError('Invalid monitored fan IDs')
         if any(isinstance(fan_id, bool) or not isinstance(fan_id, int) or not 0 < fan_id <= 255 for fan_id in (*expected_modes, *monitored_ids)):
             raise ValueError('Invalid expected fan ID')
         if any(isinstance(mode, bool) or not isinstance(mode, int) or not 0 <= mode <= 255 for mode in expected_modes.values()):
             raise ValueError('Invalid expected performance mode')
+        if any(isinstance(rpm, bool) or not isinstance(rpm, int) or not 0 < rpm <= 25500 or rpm % 100 for rpm in targets.values()):
+            raise ValueError('Invalid fan target RPM')
+        missing = tuple(sorted(targets.keys() - set(monitored_ids))) if selective else ()
+        detail = 'RPM telemetry unavailable for selected fan IDs ' + ','.join(map(str, missing)) if missing else ''
+        if not target:
+            detail = (detail + '; ' if detail else '') + 'Selected fans have different RPM targets'
         with self._condition:
             if self._closed:
                 raise RuntimeError('Fan monitor is closed')
             now = self._clock()
             self._generation += 1
-            self._request = target, monitored_ids, expected_modes
+            self._request = targets, monitored_ids, expected_modes, target, selective
             self._deadline = now + self._timeout
             self._next_poll = now + self._interval
-            self._status = ('settling', target, {}, '')
+            if not monitored_ids:
+                self._request = None
+                self._status = ('accepted', target, {}, detail)
+                return
+            self._status = ('settling', target, {}, detail)
             if self._thread is None:
                 self._thread = threading.Thread(target=self._run, name='razer-fan-monitor', daemon=True)
                 self._thread.start()
@@ -80,16 +107,16 @@ class FanMonitor:
                 self._closed = True
                 self._cancel('Device closed')
 
-    def _sample(self, generation, target, monitored_ids, expected_modes):
+    def _sample(self, generation, targets, monitored_ids, expected_modes, target, selective):
         rows = self._read_state()
         seen = set()
         for fan_id, performance, mode, rpm in rows:
             if fan_id in seen:
                 raise ValueError('Duplicate fan ID in state')
             seen.add(fan_id)
-            if fan_id not in expected_modes or performance != expected_modes[fan_id] or mode != 'manual' or rpm != target:
+            if fan_id in targets and (performance != expected_modes[fan_id] or mode != 'manual' or rpm != targets[fan_id]):
                 return 'cancelled', None, 'Fan mode or target changed'
-        if seen != expected_modes.keys():
+        if (selective and not targets.keys() <= seen) or (not selective and seen != targets.keys()):
             return 'cancelled', None, 'Available fans changed'
         with self._condition:
             if generation != self._generation or self._closed:
@@ -100,8 +127,14 @@ class FanMonitor:
         for speed in speeds.values():
             if isinstance(speed, bool) or not isinstance(speed, int) or not 0 <= speed <= 25500 or speed % 100:
                 raise ValueError('Invalid current fan RPM')
-        reached = all(abs(speeds[fan_id] - target) < 100 for fan_id in monitored_ids)
-        return 'reached' if reached else 'settling', speeds, ''
+        reached = all(abs(speeds[fan_id] - targets[fan_id]) < 100 for fan_id in monitored_ids)
+        if selective:
+            speeds = {fan_id: speeds[fan_id] for fan_id in monitored_ids}
+        missing = sorted(targets.keys() - set(monitored_ids)) if selective else []
+        detail = 'RPM telemetry unavailable for selected fan IDs ' + ','.join(map(str, missing)) if missing else ''
+        if not target:
+            detail = (detail + '; ' if detail else '') + 'Selected fans have different RPM targets'
+        return ('partially_reached' if missing else 'reached') if reached else 'settling', speeds, detail
 
     def _run(self):
         while True:
@@ -113,7 +146,9 @@ class FanMonitor:
                     now = self._clock()
                     if now >= self._deadline:
                         _, target, speeds, _ = self._status
-                        self._status = ('timeout', target, speeds, 'Fan speed did not settle before the deadline')
+                        missing = set(self._request[0]) - set(self._request[1]) if self._request[4] else set()
+                        phase = 'partially_timeout' if missing else 'timeout'
+                        self._status = (phase, target, speeds, 'Fan speed did not settle before the deadline; RPM telemetry unavailable for selected fan IDs ' + ','.join(map(str, sorted(missing))) if missing else 'Fan speed did not settle before the deadline')
                         self._request = None
                         continue
                     delay = min(self._next_poll, self._deadline) - now
@@ -132,11 +167,13 @@ class FanMonitor:
             with self._condition:
                 if generation != self._generation or self._closed:
                     continue
-                target = request[0]
+                target = request[3]
                 if speeds is None:
                     speeds = self._status[2]
-                if state in ('settling', 'reached') and self._clock() >= self._deadline:
-                    state, reason = 'timeout', 'Fan speed did not settle before the deadline'
+                if state in ('settling', 'reached', 'partially_reached') and self._clock() >= self._deadline:
+                    missing = set(request[0]) - set(request[1]) if request[4] else set()
+                    state = 'partially_timeout' if missing else 'timeout'
+                    reason = 'Fan speed did not settle before the deadline; RPM telemetry unavailable for selected fan IDs ' + ','.join(map(str, sorted(missing))) if missing else 'Fan speed did not settle before the deadline'
                 self._status = (state, target, speeds, reason)
                 if state == 'settling':
                     self._next_poll = self._clock() + self._interval

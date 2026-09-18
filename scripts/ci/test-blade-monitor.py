@@ -220,6 +220,54 @@ class FanMonitorTests(unittest.TestCase):
         self.read_state.assert_not_called()
         self.read_rpm.assert_not_called()
 
+    def test_selected_targets_monitor_only_registered_selected_ids(self):
+        self.rows = [(1, 0, 'manual', 2900), (2, 0, 'auto', 0), (3, 0, 'manual', 3000), (4, 0, 'auto', 0)]
+        monitor = self.monitor()
+        monitor.start_targets({1: 2900, 3: 3000}, (1,), {1: 0, 3: 0})
+        status = self.wait_status(monitor, 'partially_reached')
+        self.assertEqual(status[1], 0)
+        self.assertIn('3', status[3])
+        self.assertEqual(status[2], {1: 2900})
+
+    def test_selected_unmonitored_only_is_accepted_without_rpm_read(self):
+        monitor = self.monitor()
+        monitor.start_targets({3: 2900, 4: 2900}, (), {3: 0, 4: 0})
+        self.assertEqual(monitor.status[0:2], ('accepted', 2900))
+        self.assertIn('3,4', monitor.status[3])
+        self.read_rpm.assert_not_called()
+
+    def test_selected_telemetry_shortfall_is_partial_timeout(self):
+        self.rows = [(1, 0, 'manual', 2900), (2, 0, 'auto', 0), (3, 0, 'manual', 3000), (4, 0, 'auto', 0)]
+        self.speeds[1] = 2800
+        monitor = self.monitor(timeout=0.03)
+        monitor.start_targets({1: 2900, 3: 3000}, (1,), {1: 0, 3: 0})
+        status = self.wait_status(monitor, 'partially_timeout')
+        self.assertIn('3', status[3])
+
+    def test_selected_monitor_ignores_unrelated_manual_change(self):
+        self.rows = [(1, 0, 'manual', 2900), (2, 0, 'manual', 3300), (3, 0, 'auto', 0), (4, 0, 'auto', 0)]
+        monitor = self.monitor()
+        monitor.start_targets({1: 2900}, (1,), {1: 0})
+        self.assertEqual(self.wait_status(monitor, 'reached')[0], 'reached')
+
+    def test_selected_empty_request_is_rejected(self):
+        monitor = self.monitor()
+        with self.assertRaises(ValueError):
+            monitor.start_targets({}, (), {})
+
+    def test_selected_late_partial_sample_times_out(self):
+        offset = [0]
+        self.rows = [(1, 0, 'manual', 2900), (2, 0, 'auto', 0), (3, 0, 'manual', 3000), (4, 0, 'auto', 0)]
+        monitor = self.monitor(timeout=90, clock=lambda: time.monotonic() + offset[0])
+
+        def read_rpm():
+            offset[0] = 91
+            return self.speeds
+
+        self.read_rpm.side_effect = read_rpm
+        monitor.start_targets({1: 2900, 3: 3000}, (1,), {1: 0, 3: 0})
+        self.assertEqual(self.wait_status(monitor, 'partially_timeout')[2], {1: 2900})
+
 
 if __name__ == '__main__':
     unittest.main()

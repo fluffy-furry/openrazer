@@ -2,10 +2,13 @@
 
 """Fan control methods."""
 
+import re
+
 from openrazer_daemon.dbus_services import endpoint
 
 
 _FAN_FILES = ('fan_state', 'fan_rpm', 'fan_limits', 'fan_control', 'fan_modes', 'fan_rpm_monitor')
+_FAN_SELECT_FILES = _FAN_FILES + ('fan_groups', 'fan_control_select')
 
 
 def _read_fan_rows(device, filename, columns):
@@ -112,3 +115,52 @@ def get_fan_config(self):
 def get_fan_status(self):
     """Get cached settling status, requested RPM, measured RPM and explanation."""
     return self._fan_control.status
+
+
+@endpoint('razer.device.fan', 'getFanGroups', out_sig='a{say}', required_files=_FAN_SELECT_FILES)
+def get_fan_groups(self):
+    """Get the model's named fan groups and their firmware IDs."""
+    groups = {}
+    seen = set()
+    with open(self.get_driver_path('fan_groups'), 'r') as driver_file:
+        for line in driver_file:
+            fields = line.split()
+            if len(fields) != 2 or not re.fullmatch(r'[a-z][a-z0-9_]*', fields[0]) or fields[0] in groups:
+                raise ValueError('Invalid fan group')
+            values = fields[1].split(',')
+            if not values or any(not value for value in values):
+                raise ValueError('Invalid fan group IDs')
+            groups[fields[0]] = [_fan_id(value, seen) for value in values]
+    if not groups:
+        raise ValueError('No fan groups')
+    return groups
+
+
+@endpoint('razer.device.fan', 'setFanManualFans', in_sig='a{yq}', required_files=_FAN_SELECT_FILES)
+def set_fan_manual_fans(self, targets):
+    """Set only the selected fan IDs to manual RPM targets."""
+    if not isinstance(targets, dict) or not targets:
+        raise ValueError('Fan targets must be a nonempty mapping')
+    checked = {}
+    for fan_id, rpm in targets.items():
+        if isinstance(fan_id, bool) or not isinstance(fan_id, int) or not 0 < fan_id <= 255:
+            raise ValueError('Invalid fan ID')
+        if isinstance(rpm, bool) or not isinstance(rpm, int) or not 0 < rpm <= 25500 or rpm % 100:
+            raise ValueError('Invalid fan RPM')
+        checked[int(fan_id)] = int(rpm)
+    self._fan_control.set_manual_fans(checked)
+
+
+@endpoint('razer.device.fan', 'setFanAutoFans', in_sig='ay', required_files=_FAN_SELECT_FILES)
+def set_fan_auto_fans(self, ids):
+    """Return only the selected fan IDs to automatic control."""
+    if not isinstance(ids, (list, tuple)) or not ids:
+        raise ValueError('Fan IDs must be a nonempty sequence')
+    checked = []
+    seen = set()
+    for fan_id in ids:
+        if isinstance(fan_id, bool) or not isinstance(fan_id, int) or not 0 < fan_id <= 255 or fan_id in seen:
+            raise ValueError('Invalid or duplicate fan ID')
+        checked.append(int(fan_id))
+        seen.add(int(fan_id))
+    self._fan_control.set_auto_fans(tuple(checked))
