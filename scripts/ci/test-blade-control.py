@@ -176,6 +176,26 @@ class BladeControlTests(unittest.TestCase):
         self.assertEqual(self.writes, [])
         self.assertEqual(self.target_writes, [])
 
+    def test_saved_targets_do_not_restore_without_experimental_attributes(self):
+        self.device.config.set('Startup', 'restore_persistence', 'true')
+        self.device.persistence.read_dict({'FANCONTROL': {'fan_mode': 'targets', 'fan_targets': '1:4300,2:2900',
+                                                          'fan_base_rpm': '2900', 'fan_performance_mode': '0'}})
+        for missing in ('fan_target_ids', 'fan_control_targets'):
+            with self.subTest(missing=missing):
+                path = self.path / missing
+                value = path.read_text()
+                path.unlink()
+                self.control.restore_preferences()
+                self.control.update_power('battery')
+                self.control.update_power('ac')
+                self.control.prepare_for_sleep(True)
+                self.control.prepare_for_sleep(False)
+                self.assertEqual(self.writes, [])
+                self.assertEqual(self.target_writes, [])
+                self.assertEqual(self.control._target_owned, {})
+                self.assertEqual(self.control._target_targets, {})
+                path.write_text(value)
+
     def test_manual_targets_reject_unregistered_id_and_external_manual(self):
         with self.assertRaises(ValueError):
             self.control.set_manual_targets({3: 2900})

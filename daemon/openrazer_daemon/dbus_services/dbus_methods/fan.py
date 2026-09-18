@@ -169,7 +169,7 @@ def set_fan_auto_fans(self, ids):
 
 @endpoint('razer.device.fan', 'getFanTargetIds', out_sig='ay', required_files=_FAN_TARGET_FILES)
 def get_fan_target_ids(self):
-    """Get IDs whose RPM target can change independently in global manual mode."""
+    """Get experimentally enabled independent fan RPM target IDs."""
     with open(self.get_driver_path('fan_target_ids'), 'r') as driver_file:
         lines = driver_file.read().splitlines()
     if len(lines) != 1 or not lines[0]:
@@ -180,7 +180,7 @@ def get_fan_target_ids(self):
 
 @endpoint('razer.device.fan', 'setFanManualTargets', in_sig='a{yq}', required_files=_FAN_TARGET_FILES)
 def set_fan_manual_targets(self, targets):
-    """Set independent targets while keeping every fan in global manual mode."""
+    """Experimentally set independent targets while every fan stays manual."""
     if not isinstance(targets, dict) or not targets:
         raise ValueError('Fan targets must be a nonempty mapping')
     checked = {}

@@ -18,7 +18,7 @@ class BladeDriverTests(unittest.TestCase):
         temporary = Path(cls.directory.name)
         # The C harness supplies these kernel definitions.
         (temporary / "linux").mkdir()
-        for name in ("delay.h", "sysfs.h"):
+        for name in ("delay.h", "module.h", "sysfs.h"):
             (temporary / "linux" / name).write_text("/* Offline harness shim. */\n")
         root = Path(__file__).resolve().parents[2]
         cls.executable = temporary / "blade-driver-tests"
@@ -127,6 +127,9 @@ class BladeDriverTests(unittest.TestCase):
 
     def test_target_only_control_preserves_global_manual_mode(self):
         self.scenario("target-only")
+
+    def test_experimental_targets_require_explicit_opt_in_and_model_registration(self):
+        self.scenario("experimental-target-gate")
 
     def test_target_only_preflight_blocks_invalid_or_ineligible_writes(self):
         self.scenario("target-preflight")

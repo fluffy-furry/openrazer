@@ -91,12 +91,12 @@ class BladeModelTests(unittest.TestCase):
         catalog = {product for product in range(65536) if self.lookup(product, 2)}
         self.assertEqual(catalog, set(self.PRODUCTS))
 
-    def test_fake_devices_expose_fans_only_for_registered_products(self):
+    def assert_fake_devices(self, directory, experimental_targets=False):
         catalog = {product for product in range(65536) if self.lookup(product, 2)}
         registered = set()
         expected = {"fan_control": "w", "fan_limits": "r", "fan_rpm": "r", "fan_state": "r",
                     "fan_modes": "r", "fan_rpm_monitor": "r"}
-        for path in (self.root / "pylib/openrazer/_fake_driver").glob("*.cfg"):
+        for path in directory.glob("*.cfg"):
             config = configparser.ConfigParser()
             config.read(path)
             identity = config["device"]["dir_name"].split(":")
@@ -115,7 +115,7 @@ class BladeModelTests(unittest.TestCase):
                     model_expected = dict(expected)
                     if model.features & (1 << 2):
                         model_expected.update({"fan_groups": "r", "fan_control_select": "w"})
-                    if model.target_fans:
+                    if experimental_targets and model.target_fans:
                         model_expected.update({"fan_target_ids": "r", "fan_control_targets": "w"})
                     self.assertEqual(attributes, model_expected)
                     self.assertEqual(values["fan_modes"], f"{model.automatic_modes} {model.manual_modes}")
@@ -125,13 +125,44 @@ class BladeModelTests(unittest.TestCase):
                         self.assertEqual(bytes.fromhex(values["fan_groups"].removeprefix("0x")),
                                          model.fan_groups)
                         self.assertEqual(values["fan_control_select"], "")
-                    if model.target_fans:
+                    if experimental_targets and model.target_fans:
                         self.assertEqual(bytes.fromhex(values["fan_target_ids"].removeprefix("0x")), b"1,2")
                         self.assertEqual(values["fan_control_targets"], "")
                     registered.add(product)
                 else:
                     self.assertEqual(attributes, {})
         self.assertEqual(registered, catalog)
+
+    def test_fake_devices_expose_fans_only_for_registered_products(self):
+        self.assert_fake_devices(self.root / "pylib/openrazer/_fake_driver")
+
+    def test_generated_targets_require_explicit_opt_in_and_model_support(self):
+        sources = (
+            "scripts/generate_fake_driver.sh",
+            "scripts/blade_model_metadata.c",
+            "driver/razerblade_models.c",
+            "driver/razerblade_models.h",
+            "driver/razerkbd_driver.c",
+            "driver/razerkbd_driver.h",
+        )
+        for experimental in (False, True):
+            with self.subTest(experimental=experimental), tempfile.TemporaryDirectory(
+                    prefix="openrazer-blade-fake-") as directory:
+                root = Path(directory)
+                for source in sources:
+                    destination = root / source
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(self.root / source, destination)
+                fixtures = root / "pylib/openrazer/_fake_driver"
+                fixtures.mkdir(parents=True)
+                subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+                subprocess.run(["git", "add", "driver/razerkbd_driver.h"], cwd=root, check=True)
+                command = ["bash", "scripts/generate_fake_driver.sh", "razerkbd"]
+                if experimental:
+                    command.append("--experimental-fan-targets")
+                generated = subprocess.run(command, cwd=root, capture_output=True, text=True)
+                self.assertEqual(generated.returncode, 0, generated.stdout + generated.stderr)
+                self.assert_fake_devices(fixtures, experimental)
 
     def test_manual_and_automatic_modes_remain_distinct(self):
         for product in self.PRODUCTS:

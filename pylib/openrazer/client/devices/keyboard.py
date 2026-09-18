@@ -95,14 +95,23 @@ class RazerKeyboard(__RazerDevice):
 
     @property
     def fan_target_ids(self) -> tuple[int, ...]:
-        """Return fan IDs with independent RPM targets in global manual mode."""
+        """Return experimentally enabled independent fan RPM target IDs.
+
+        Requires the razerkbd experimental_fan_targets module option and model
+        support. This capability is unavailable by default.
+        """
         if self.has('fan_target_control'):
             return tuple(int(fan_id) for fan_id in self._dbus_interfaces['fan'].getFanTargetIds())
         else:
             raise NotImplementedError()
 
     def set_fan_manual_targets(self, targets: dict[int, int]) -> None:
-        """Set selected RPM targets while all fans remain in manual mode."""
+        """Experimentally set selected RPM targets in shared manual mode.
+
+        Requires the razerkbd experimental_fan_targets module option and model
+        support. Entering manual mode sets all fans to the firmware default RPM
+        before applying selected targets. Auto/manual selection remains global.
+        """
         if self.has('fan_target_control'):
             if not isinstance(targets, dict) or not targets:
                 raise ValueError('Fan targets must be a nonempty mapping')

@@ -156,10 +156,14 @@ get_attr_from_create_device_file() {
 }
 
 driver=$1
+experimental_fan_targets=false
 
-if [ -z "$driver" ]; then
-    echo "Usage: $0 razerkbd/razermouse"
+if [ -z "$driver" ] || [ "$#" -gt 2 ] || { [ "$#" -eq 2 ] && [ "$2" != "--experimental-fan-targets" ]; }; then
+    echo "Usage: $0 razerkbd/razermouse [--experimental-fan-targets]"
     exit 1
+fi
+if [ "$2" = "--experimental-fan-targets" ]; then
+    experimental_fan_targets=true
 fi
 
 driver_short=$(echo "$driver" | sed 's/razer//g')
@@ -223,7 +227,7 @@ while IFS= read -r device_raw; do
     if [ "${blade_fan_select[$device_pid]}" = "1" ]; then
         all_attrs+=$'\nfan_control_select\nfan_groups'
     fi
-    if [ "${blade_fan_targets[$device_pid]}" != "" ] && [ "${blade_fan_targets[$device_pid]}" != "0" ]; then
+    if [ "$experimental_fan_targets" = true ] && [ "${blade_fan_targets[$device_pid]}" != "" ] && [ "${blade_fan_targets[$device_pid]}" != "0" ]; then
         all_attrs+=$'\nfan_control_targets\nfan_target_ids'
     fi
     all_attrs=$(echo "$all_attrs" | sort)

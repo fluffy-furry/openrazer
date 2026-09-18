@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include <linux/delay.h>
+#include <linux/module.h>
 #include <linux/sysfs.h>
 
 #include "razercommon.h"
@@ -11,12 +12,24 @@
 #define BLADE_WAIT_US 5000
 #define BLADE_MAX_FANS 79
 
+static bool experimental_fan_targets;
+module_param(experimental_fan_targets, bool, 0444);
+MODULE_PARM_DESC(experimental_fan_targets, "Enable experimental per-fan RPM targets on supported Blade models");
+
 struct blade_fan_state {
     u8 id;
     u8 performance;
     u8 manual;
     u8 target;
 };
+
+static bool blade_fan_targets_enabled(const struct razer_kbd_device *device)
+{
+    return experimental_fan_targets &&
+           (device->blade_model->features & (RAZER_BLADE_FAN_CONTROL | RAZER_BLADE_FAN_TARGETS)) ==
+           (RAZER_BLADE_FAN_CONTROL | RAZER_BLADE_FAN_TARGETS) &&
+           device->blade_model->target_fans;
+}
 
 static int blade_exchange_class(struct razer_kbd_device *device, u8 command_class, u8 command,
                                 const u8 *args, unsigned int size, unsigned int minimum,
@@ -319,6 +332,8 @@ static ssize_t fan_target_ids_show(struct device *dev, struct device_attribute *
     unsigned int id;
     int length = 0;
 
+    if (!blade_fan_targets_enabled(device))
+        return -EOPNOTSUPP;
     for (id = 1; id < 32; id++) {
         if (!(mask & (1U << id)))
             continue;
@@ -622,8 +637,7 @@ static ssize_t fan_control_targets_store(struct device *dev, struct device_attri
     u8 limits[3];
     int err, recovery;
 
-    if ((device->blade_model->features & (RAZER_BLADE_FAN_CONTROL | RAZER_BLADE_FAN_TARGETS)) !=
-        (RAZER_BLADE_FAN_CONTROL | RAZER_BLADE_FAN_TARGETS))
+    if (!blade_fan_targets_enabled(device))
         return -EOPNOTSUPP;
     if (!count || count > PAGE_SIZE || memchr(buf, '\0', count))
         return -EINVAL;
@@ -766,9 +780,7 @@ static umode_t blade_attribute_visible(struct kobject *kobj, struct attribute *a
         return (device->blade_model->features & (RAZER_BLADE_FAN_CONTROL | RAZER_BLADE_FAN_SELECT)) ==
                (RAZER_BLADE_FAN_CONTROL | RAZER_BLADE_FAN_SELECT) ? attr->mode : 0;
     if (attr == &dev_attr_fan_target_ids.attr || attr == &dev_attr_fan_control_targets.attr)
-        return (device->blade_model->features & (RAZER_BLADE_FAN_CONTROL | RAZER_BLADE_FAN_TARGETS)) ==
-               (RAZER_BLADE_FAN_CONTROL | RAZER_BLADE_FAN_TARGETS) &&
-               device->blade_model->target_fans ? attr->mode : 0;
+        return blade_fan_targets_enabled(device) ? attr->mode : 0;
     return device->blade_model->features & RAZER_BLADE_FAN_CONTROL ? attr->mode : 0;
 }
 

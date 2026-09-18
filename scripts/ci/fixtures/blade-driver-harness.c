@@ -80,6 +80,8 @@ struct attribute_group {
     umode_t (*is_visible)(struct kobject *, struct attribute *, int);
 };
 #define DEVICE_ATTR(n, mode, show, store) struct device_attribute dev_attr_##n = {{#n, mode}, show, store}
+#define module_param(name, type, perm) _Static_assert((perm) == 0444, "module parameter must be read-only")
+#define MODULE_PARM_DESC(name, description) _Static_assert(sizeof(description) > 1, "module parameter must be described")
 
 static struct usb_device usb;
 static struct usb_host_interface alternate;
@@ -501,6 +503,7 @@ int main(int argc, char **argv)
     unsigned int i;
     assert(argc == 2);
     name = argv[1];
+    assert(!experimental_fan_targets);
     reset();
     if (!strcmp(name, "partial-recovery")) {
         mock.fail_target_fan = 2;
@@ -936,6 +939,7 @@ int main(int argc, char **argv)
         assert(mock.performance[1] == 5 && mock.performance[2] == 5);
         assert(!mock.manual[1] && !mock.manual[2]);
     } else if (!strcmp(name, "feature-visibility")) {
+        experimental_fan_targets = true;
         custom = *device.blade_model;
         device.blade_model = &custom;
         assert(blade_group.is_visible);
@@ -975,6 +979,7 @@ int main(int argc, char **argv)
         assert(!mock.sends && !mock.receives && !mock.pm_gets);
     } else if (!strcmp(name, "model-metadata")) {
         char output[PAGE_SIZE];
+        experimental_fan_targets = true;
         assert(fan_modes_show(&hid.dev, NULL, output) > 0);
         assert(!strcmp(output, "81 1\n"));
         assert(fan_rpm_monitor_show(&hid.dev, NULL, output) > 0);
@@ -993,8 +998,41 @@ int main(int argc, char **argv)
         assert(fan_rpm_monitor_show(&hid.dev, NULL, output) > 0);
         assert(!strcmp(output, "2\n"));
         assert(!mock.sends && !mock.receives && !mock.pm_gets);
+    } else if (!strcmp(name, "experimental-target-gate")) {
+        char output[PAGE_SIZE];
+        assert(!experimental_fan_targets);
+        assert(!blade_group.is_visible(&hid.dev.kobj, &dev_attr_fan_target_ids.attr, 8));
+        assert(!blade_group.is_visible(&hid.dev.kobj, &dev_attr_fan_control_targets.attr, 9));
+        assert(fan_target_ids_show(&hid.dev, NULL, output) == -EOPNOTSUPP);
+        assert(fan_target_store("1:4300") == -EOPNOTSUPP);
+        assert(!mock.sends && !mock.receives && !mock.pm_gets && !mock.writes);
+        for (i = 0; i < 6; i++)
+            assert(blade_group.is_visible(&hid.dev.kobj, blade_group.attrs[i], i) == blade_group.attrs[i]->mode);
+        assert(fan_store("2900") == 4);
+        assert(mock.manual[1] && mock.manual[2]);
+        assert(fan_store("auto") == 4);
+        assert(!mock.manual[1] && !mock.manual[2]);
+        reset();
+        experimental_fan_targets = true;
+        assert(blade_group.is_visible(&hid.dev.kobj, &dev_attr_fan_target_ids.attr, 8) == 0440);
+        assert(blade_group.is_visible(&hid.dev.kobj, &dev_attr_fan_control_targets.attr, 9) == 0220);
+        assert(fan_target_ids_show(&hid.dev, NULL, output) == 4);
+        assert(!strcmp(output, "1,2\n"));
+        assert(!mock.sends && !mock.receives && !mock.pm_gets && !mock.writes);
+        custom.target_fans = 0;
+        assert(!blade_group.is_visible(&hid.dev.kobj, &dev_attr_fan_target_ids.attr, 8));
+        assert(!blade_group.is_visible(&hid.dev.kobj, &dev_attr_fan_control_targets.attr, 9));
+        assert(fan_target_ids_show(&hid.dev, NULL, output) == -EOPNOTSUPP);
+        assert(fan_target_store("1:4300") == -EOPNOTSUPP);
+        guarded_model(0x029F);
+        assert(!blade_group.is_visible(&hid.dev.kobj, &dev_attr_fan_target_ids.attr, 8));
+        assert(!blade_group.is_visible(&hid.dev.kobj, &dev_attr_fan_control_targets.attr, 9));
+        assert(fan_target_ids_show(&hid.dev, NULL, output) == -EOPNOTSUPP);
+        assert(fan_target_store("1:4300") == -EOPNOTSUPP);
+        assert(!mock.sends && !mock.receives && !mock.pm_gets && !mock.writes);
     } else if (!strcmp(name, "target-only")) {
         char output[PAGE_SIZE];
+        experimental_fan_targets = true;
         mock.fan_count = 4;
         mock.fan_ids[2] = 3;
         mock.fan_ids[3] = 4;
@@ -1016,6 +1054,7 @@ int main(int argc, char **argv)
         const char *invalid[] = {"", "auto", "manual 1:4300", "1:0", "1:4301",
                                  "1:4300,", "1:4300,1:2900", "3:2900", "1:25600",
                                  "1:27900"};
+        experimental_fan_targets = true;
         for (i = 0; i < sizeof(invalid) / sizeof(*invalid); i++) {
             reset();
             assert(fan_target_store(invalid[i]) == -EINVAL);
@@ -1042,6 +1081,7 @@ int main(int argc, char **argv)
         guarded_model(0x029F);
         assert(fan_target_store("1:4300") == -EOPNOTSUPP && !mock.sends);
     } else if (!strcmp(name, "target-coupled")) {
+        experimental_fan_targets = true;
         mock.fan_count = 4;
         mock.fan_ids[2] = 3;
         mock.fan_ids[3] = 4;
@@ -1058,6 +1098,7 @@ int main(int argc, char **argv)
         }
         assert(!mock.warnings);
     } else if (!strcmp(name, "target-error-recovery")) {
+        experimental_fan_targets = true;
         mock.fan_count = 4;
         mock.fan_ids[2] = 3;
         mock.fan_ids[3] = 4;
@@ -1202,6 +1243,9 @@ int main(int argc, char **argv)
         assert(!blade_group.is_visible(&hid.dev.kobj, &dev_attr_fan_control_select.attr, 7));
         assert(device.blade_model->features & RAZER_BLADE_FAN_TARGETS);
         assert(device.blade_model->target_fans == (BIT(1) | BIT(2)));
+        assert(!blade_group.is_visible(&hid.dev.kobj, &dev_attr_fan_target_ids.attr, 8));
+        assert(!blade_group.is_visible(&hid.dev.kobj, &dev_attr_fan_control_targets.attr, 9));
+        experimental_fan_targets = true;
         assert(blade_group.is_visible(&hid.dev.kobj, &dev_attr_fan_target_ids.attr, 8) == 0440);
         assert(blade_group.is_visible(&hid.dev.kobj, &dev_attr_fan_control_targets.attr, 9) == 0220);
         assert(fan_select_store("manual 3:2900") == -EOPNOTSUPP);
