@@ -4,6 +4,7 @@
 
 #define RAZER_BLADE_FAN_CONTROL (1U << 0)
 #define RAZER_BLADE_MAX_FAN_OVERRIDE (1U << 1)
+#define RAZER_BLADE_FAN_SELECT (1U << 2)
 
 struct razer_blade_model {
     unsigned short product_id;
@@ -14,6 +15,7 @@ struct razer_blade_model {
     unsigned int manual_modes;
     unsigned int automatic_modes;
     unsigned int monitored_fans;
+    const char *fan_groups;
 };
 
 const struct razer_blade_model *razer_blade_lookup_model(unsigned short product_id,

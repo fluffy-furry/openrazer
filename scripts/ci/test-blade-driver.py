@@ -107,6 +107,18 @@ class BladeDriverTests(unittest.TestCase):
     def test_model_policy_metadata_is_read_only_and_requires_no_io(self):
         self.scenario("model-metadata")
 
+    def test_selected_control_changes_only_requested_fans(self):
+        self.scenario("selected-control")
+
+    def test_selected_failure_recovers_only_requested_fans(self):
+        self.scenario("selected-recovery")
+
+    def test_auxiliary_fan_group_can_be_controlled_without_touching_primary_fans(self):
+        self.scenario("selected-auxiliary")
+
+    def test_selected_input_and_firmware_preflight_block_invalid_writes(self):
+        self.scenario("selected-preflight")
+
     def test_sysfs_group_is_limited_to_supported_product_and_interface(self):
         self.scenario("sysfs-gate")
 

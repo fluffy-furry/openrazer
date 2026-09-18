@@ -19,6 +19,7 @@ class Model(ctypes.Structure):
         ("manual_modes", ctypes.c_uint),
         ("automatic_modes", ctypes.c_uint),
         ("monitored_fans", ctypes.c_uint),
+        ("fan_groups", ctypes.c_char_p),
     ]
 
 
@@ -66,11 +67,14 @@ class BladeModelTests(unittest.TestCase):
                 self.assertEqual(model.product_id, product)
                 self.assertEqual(model.interface_number, 2)
                 self.assertEqual((model.fan_profile, model.info_profile), (1, 0))
-                self.assertEqual(model.features, 3 if product in (0x029F, 0x02B8) else 1)
+                features = 5 if product == 0x0256 else 3 if product in (0x029F, 0x02B8) else 1
+                self.assertEqual(model.features, features)
                 self.assertEqual(model.manual_modes, 1 << 0)
                 automatic = sum(1 << mode for mode in self.AUTOMATIC_MODES[product])
                 self.assertEqual(model.automatic_modes, automatic)
                 self.assertEqual(model.monitored_fans, (1 << 1) | (1 << 2))
+                self.assertEqual(model.fan_groups,
+                                 b"cpu_gpu 1,2\nbattery 3,4\n" if product == 0x0256 else None)
 
     def test_unknown_products_and_other_interfaces_are_not_enabled(self):
         for product in (0, 0x0255, 0x02FF, 0xFFFF):
@@ -106,10 +110,18 @@ class BladeModelTests(unittest.TestCase):
                     values[name] = value[0] if value else ""
             with self.subTest(device=path.name):
                 if vendor == 0x1532 and product in catalog:
-                    self.assertEqual(attributes, expected)
                     model = self.lookup(product, 2).contents
+                    model_expected = dict(expected)
+                    if model.features & (1 << 2):
+                        model_expected.update({"fan_groups": "r", "fan_control_select": "w"})
+                    self.assertEqual(attributes, model_expected)
                     self.assertEqual(values["fan_modes"], f"{model.automatic_modes} {model.manual_modes}")
                     self.assertEqual(values["fan_rpm_monitor"], str(model.monitored_fans))
+                    if model.features & (1 << 2):
+                        self.assertTrue(values["fan_groups"].startswith("0x"))
+                        self.assertEqual(bytes.fromhex(values["fan_groups"].removeprefix("0x")),
+                                         model.fan_groups)
+                        self.assertEqual(values["fan_control_select"], "")
                     registered.add(product)
                 else:
                     self.assertEqual(attributes, {})

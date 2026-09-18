@@ -277,6 +277,15 @@ static ssize_t fan_rpm_monitor_show(struct device *dev, struct device_attribute 
     return sysfs_emit(buf, "%u\n", device->blade_model->monitored_fans);
 }
 
+static ssize_t fan_groups_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct razer_kbd_device *device = dev_get_drvdata(dev);
+
+    if (!device->blade_model->fan_groups)
+        return -ENODATA;
+    return sysfs_emit(buf, "%s", device->blade_model->fan_groups);
+}
+
 static int blade_fan_mode_set(struct razer_kbd_device *device,
                               const struct blade_fan_state *fan, u8 manual)
 {
@@ -372,12 +381,169 @@ out:
     return err ? err : count;
 }
 
+static int blade_parse_decimal(const char **cursor, const char *end, unsigned int *value)
+{
+    unsigned int number = 0, digit;
+
+    if (*cursor == end || **cursor < '0' || **cursor > '9')
+        return -EINVAL;
+    do {
+        digit = **cursor - '0';
+        if (number > (25500 - digit) / 10)
+            return -EINVAL;
+        number = number * 10 + digit;
+        (*cursor)++;
+    } while (*cursor < end && **cursor >= '0' && **cursor <= '9');
+    *value = number;
+    return 0;
+}
+
+static ssize_t fan_control_select_store(struct device *dev, struct device_attribute *attr,
+                                        const char *buf, size_t count)
+{
+    struct razer_kbd_device *device = dev_get_drvdata(dev);
+    struct blade_fan_state available[BLADE_MAX_FANS], selected[BLADE_MAX_FANS], readback;
+    struct razer_report response;
+    unsigned int fan_count, selected_count = 0, i, j, id, value;
+    const char *cursor, *end;
+    size_t length = count;
+    u8 targets[BLADE_MAX_FANS];
+    u8 limits[3];
+    bool manual;
+    int err, recovery;
+
+    if ((device->blade_model->features & (RAZER_BLADE_FAN_CONTROL | RAZER_BLADE_FAN_SELECT)) !=
+        (RAZER_BLADE_FAN_CONTROL | RAZER_BLADE_FAN_SELECT))
+        return -EOPNOTSUPP;
+    if (!count || count > PAGE_SIZE || memchr(buf, '\0', count))
+        return -EINVAL;
+    if (buf[length - 1] == '\n')
+        length--;
+    if (length > 7 && !memcmp(buf, "manual ", 7)) {
+        manual = true;
+        cursor = buf + 7;
+    } else if (length > 5 && !memcmp(buf, "auto ", 5)) {
+        manual = false;
+        cursor = buf + 5;
+    } else {
+        return -EINVAL;
+    }
+    end = buf + length;
+    while (cursor < end) {
+        if (selected_count == BLADE_MAX_FANS)
+            return -E2BIG;
+        err = blade_parse_decimal(&cursor, end, &id);
+        if (err || !id || id > 255)
+            return -EINVAL;
+        value = 0;
+        if (manual) {
+            if (cursor == end || *cursor++ != ':')
+                return -EINVAL;
+            err = blade_parse_decimal(&cursor, end, &value);
+            if (err || !value || value % 100)
+                return -EINVAL;
+        }
+        if (cursor < end && *cursor != ',')
+            return -EINVAL;
+        for (i = 0; i < selected_count; i++) {
+            if (selected[i].id == id)
+                return -EINVAL;
+        }
+        selected[selected_count].id = id;
+        targets[selected_count++] = value / 100;
+        if (cursor == end)
+            break;
+        cursor++;
+        if (cursor == end)
+            return -EINVAL;
+    }
+
+    mutex_lock(&device->lock);
+    err = blade_fans_get(device, available, &fan_count);
+    if (err)
+        goto out;
+    for (i = 0; i < selected_count; i++) {
+        for (j = 0; j < fan_count; j++) {
+            if (available[j].id == selected[i].id)
+                break;
+        }
+        if (j == fan_count) {
+            err = -ENODEV;
+            goto out;
+        }
+        err = blade_fan_mode_get(device, &selected[i]);
+        if (err)
+            goto out;
+        if (!razer_blade_fan_mode_supported(device->blade_model, selected[i].performance, manual)) {
+            err = -EOPNOTSUPP;
+            goto out;
+        }
+        if (i && selected[i].performance != selected[0].performance) {
+            err = -EAGAIN;
+            goto out;
+        }
+    }
+    if (manual) {
+        err = blade_limits_get(device, limits);
+        if (err)
+            goto out;
+        for (i = 0; i < selected_count; i++) {
+            if (targets[i] < limits[0] || targets[i] > limits[2]) {
+                err = -ERANGE;
+                goto out;
+            }
+        }
+    }
+    err = blade_prepare_fan_control(device, selected[0].performance);
+    if (err)
+        goto out;
+    for (i = 0; i < selected_count; i++) {
+        const u8 args[3] = {device->blade_model->fan_profile, selected[i].id, targets[i]};
+
+        err = blade_fan_mode_set(device, &selected[i], manual);
+        if (err)
+            goto recover_auto;
+        if (manual) {
+            err = blade_exchange(device, 0x01, args, sizeof(args), 3, &response);
+            if (err)
+                goto recover_auto;
+        }
+        readback.id = selected[i].id;
+        err = manual ? blade_fan_state_get(device, &readback) : blade_fan_mode_get(device, &readback);
+        if (!err && (readback.performance != selected[i].performance ||
+                     readback.manual != manual || (manual && readback.target != targets[i])))
+            err = -EIO;
+        if (err)
+            goto recover_auto;
+    }
+    goto out;
+
+recover_auto:
+    for (i = 0; i < selected_count; i++) {
+        recovery = blade_fan_mode_set(device, &selected[i], 0);
+        if (!recovery) {
+            readback.id = selected[i].id;
+            recovery = blade_fan_mode_get(device, &readback);
+            if (!recovery && (readback.manual || readback.performance != selected[i].performance))
+                recovery = -EIO;
+        }
+        if (recovery)
+            hid_warn(device->hdev, "Could not confirm automatic control of fan %u: %d\n",
+                     selected[i].id, recovery);
+    }
+out:
+    mutex_unlock(&device->lock);
+    return err ? err : count;
+}
+
 static DEVICE_ATTR(fan_state,   0440, fan_state_show,  NULL);
 static DEVICE_ATTR(fan_rpm,     0440, fan_rpm_show,    NULL);
 static DEVICE_ATTR(fan_limits,  0440, fan_limits_show, NULL);
 static DEVICE_ATTR(fan_control, 0220, NULL,           fan_control_store);
 static DEVICE_ATTR(fan_modes, 0440, fan_modes_show, NULL);
 static DEVICE_ATTR(fan_rpm_monitor, 0440, fan_rpm_monitor_show, NULL);
+static DEVICE_ATTR(fan_groups, 0440, fan_groups_show, NULL);
+static DEVICE_ATTR(fan_control_select, 0220, NULL, fan_control_select_store);
 
 static struct attribute *blade_attributes[] = {
     &dev_attr_fan_state.attr,
@@ -386,12 +552,17 @@ static struct attribute *blade_attributes[] = {
     &dev_attr_fan_control.attr,
     &dev_attr_fan_modes.attr,
     &dev_attr_fan_rpm_monitor.attr,
+    &dev_attr_fan_groups.attr,
+    &dev_attr_fan_control_select.attr,
     NULL
 };
 
 static umode_t blade_attribute_visible(struct kobject *kobj, struct attribute *attr, int index)
 {
     struct razer_kbd_device *device = dev_get_drvdata(kobj_to_dev(kobj));
+    if (attr == &dev_attr_fan_groups.attr || attr == &dev_attr_fan_control_select.attr)
+        return (device->blade_model->features & (RAZER_BLADE_FAN_CONTROL | RAZER_BLADE_FAN_SELECT)) ==
+               (RAZER_BLADE_FAN_CONTROL | RAZER_BLADE_FAN_SELECT) ? attr->mode : 0;
     return device->blade_model->features & RAZER_BLADE_FAN_CONTROL ? attr->mode : 0;
 }
 

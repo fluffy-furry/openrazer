@@ -35,6 +35,8 @@ declare -A files_metadata=(
     ["fast_charging_matrix_effect_wave"]="w;"
     ["firmware_version"]="r;v1.0"
     ["fan_control"]="w;"
+    ["fan_control_select"]="w;"
+    ["fan_groups"]="r;"
     ["fan_limits"]="r;2300 2900 4300"
     ["fan_modes"]="r;"
     ["fan_rpm_monitor"]="r;"
@@ -162,6 +164,8 @@ driver_short=$(echo "$driver" | sed 's/razer//g')
 
 declare -A blade_fan_modes=()
 declare -A blade_fan_monitor=()
+declare -A blade_fan_select=()
+declare -A blade_fan_groups=()
 if [ "$driver" = "razerkbd" ]; then
     blade_catalog_dir=$(mktemp -d) || exit 1
     trap 'rm -rf -- "$blade_catalog_dir"' EXIT
@@ -170,10 +174,14 @@ if [ "$driver" = "razerkbd" ]; then
         exit 1
     fi
     blade_catalog=$("$blade_catalog_dir/models") || exit 1
-    while read -r product automatic manual monitored; do
+    while read -r product automatic manual monitored select_fans group_hex; do
         [ -z "$product" ] && continue
         blade_fan_modes[$product]="$automatic $manual"
         blade_fan_monitor[$product]="$monitored"
+        blade_fan_select[$product]="$select_fans"
+        if [ "$select_fans" = "1" ]; then
+            blade_fan_groups[$product]="0x$group_hex"
+        fi
     done <<< "$blade_catalog"
 fi
 
@@ -207,6 +215,9 @@ while IFS= read -r device_raw; do
     all_attrs=$(echo "$device_attrs"; echo "$common_attrs")
     if [ -n "${blade_fan_modes[$device_pid]}" ]; then
         all_attrs+=$'\nfan_control\nfan_limits\nfan_rpm\nfan_state\nfan_modes\nfan_rpm_monitor'
+    fi
+    if [ "${blade_fan_select[$device_pid]}" = "1" ]; then
+        all_attrs+=$'\nfan_control_select\nfan_groups'
     fi
     all_attrs=$(echo "$all_attrs" | sort)
 
@@ -270,6 +281,8 @@ EOF
             default="${blade_fan_modes[$device_pid]}"
         elif [ "$attr" = "fan_rpm_monitor" ]; then
             default="${blade_fan_monitor[$device_pid]}"
+        elif [ "$attr" = "fan_groups" ]; then
+            default="${blade_fan_groups[$device_pid]}"
         fi
 
         if [ "$first_attr" = false ]; then

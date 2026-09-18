@@ -2,7 +2,7 @@
 #include "razerblade_models.h"
 
 #define BALANCED_CUSTOM_DC ((1U << 0) | (1U << 4) | (1U << 6))
-#define RPM_MODEL(pid, auto_modes, extra_features) { \
+#define RPM_GROUP_MODEL(pid, auto_modes, extra_features, groups) { \
         .product_id = (pid), \
         .interface_number = 2, \
         .fan_profile = 1, \
@@ -11,11 +11,15 @@
         .manual_modes = (1U << 0), \
         .automatic_modes = (auto_modes), \
         .monitored_fans = (1U << 1) | (1U << 2), \
+        .fan_groups = (groups), \
     }
+#define RPM_MODEL(pid, auto_modes, extra_features) \
+    RPM_GROUP_MODEL(pid, auto_modes, extra_features, 0)
 
 static const struct razer_blade_model blade_models[] = {
     RPM_MODEL(0x0253, BALANCED_CUSTOM_DC, 0), /* Blade 15 Advanced (2020) */
-    RPM_MODEL(0x0256, BALANCED_CUSTOM_DC, 0), /* Blade Pro 17 (Early 2020) */
+    RPM_GROUP_MODEL(0x0256, BALANCED_CUSTOM_DC, RAZER_BLADE_FAN_SELECT,
+                    "cpu_gpu 1,2\nbattery 3,4\n"), /* Blade Pro 17 (Early 2020) */
     RPM_MODEL(0x026E, BALANCED_CUSTOM_DC, 0), /* Blade 17 Pro (Early 2021) */
     RPM_MODEL(0x0270, BALANCED_CUSTOM_DC, 0), /* Blade 14 (2021, AMD) */
     RPM_MODEL(0x028B, BALANCED_CUSTOM_DC | (1U << 5), 0), /* Blade 17 (2022) */
