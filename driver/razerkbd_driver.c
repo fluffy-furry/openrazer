@@ -3647,6 +3647,20 @@ static int has_inverted_led_state(struct device *dev)
     }
 }
 
+static int razer_send_logo_payload(struct razer_kbd_device *device, struct razer_report *request, struct razer_report *response)
+{
+    int retry, err;
+
+    for (retry = 0; retry < 5; retry++) {
+        err = razer_send_payload(device, request, response);
+        if (err || response->status != RAZER_CMD_BUSY)
+            return err;
+        fsleep(10000);
+    }
+
+    return -EBUSY;
+}
+
 /**
  * Reads device file "logo_led_state"
  *
@@ -3658,18 +3672,24 @@ static ssize_t razer_attr_read_logo_led_state(struct device *dev, struct device_
     struct razer_report request = {0};
     struct razer_report response = {0};
     int state;
+    unsigned char storage = device->usb_pid == USB_DEVICE_ID_RAZER_BLADE_PRO_EARLY_2020 ? NOSTORE : VARSTORE;
     int err;
 
-    request = razer_chroma_standard_get_led_effect(VARSTORE, LOGO_LED);
+    request = razer_chroma_standard_get_led_effect(storage, LOGO_LED);
     request.transaction_id.id = 0xFF;
 
-    // Blade laptops don't use effect for logo on/off, and mode 2 ("blink") is technically unsupported.
+    // Blade laptops use a separate state for logo on/off.
     if (is_blade_laptop(device)) {
-        request = razer_chroma_standard_get_led_state(VARSTORE, LOGO_LED);
+        request = razer_chroma_standard_get_led_state(storage, LOGO_LED);
         request.transaction_id.id = 0xFF;
     }
 
-    err = razer_send_payload(device, &request, &response);
+    mutex_lock(&device->logo_lock);
+    if (device->usb_pid == USB_DEVICE_ID_RAZER_BLADE_PRO_EARLY_2020)
+        err = razer_send_logo_payload(device, &request, &response);
+    else
+        err = razer_send_payload(device, &request, &response);
+    mutex_unlock(&device->logo_lock);
     if (err)
         return err;
     state = response.arguments[2];
@@ -3691,6 +3711,7 @@ static ssize_t razer_attr_write_logo_led_state(struct device *dev, struct device
     struct razer_report request = {0};
     struct razer_report response = {0};
     unsigned char state;
+    unsigned char storage = device->usb_pid == USB_DEVICE_ID_RAZER_BLADE_PRO_EARLY_2020 ? NOSTORE : VARSTORE;
     int err;
 
     err = kstrtou8(buf, 0, &state);
@@ -3701,20 +3722,73 @@ static ssize_t razer_attr_write_logo_led_state(struct device *dev, struct device
         state = !state;
 
     // Blade laptops are... different. They use state instead of effect.
-    // Note: This does allow setting of mode 2 ("blink"), but this is an undocumented feature.
+    // Non-boolean values retain the legacy LED effect interface.
     if (is_blade_laptop(device) && (state == 0 || state == 1)) {
-        request = razer_chroma_standard_set_led_state(VARSTORE, LOGO_LED, state);
+        request = razer_chroma_standard_set_led_state(storage, LOGO_LED, state);
         request.transaction_id.id = 0xFF;
     } else {
-        request = razer_chroma_standard_set_led_effect(VARSTORE, LOGO_LED, state);
+        request = razer_chroma_standard_set_led_effect(storage, LOGO_LED, state);
         request.transaction_id.id = 0xFF;
     }
 
-    err = razer_send_payload(device, &request, &response);
+    mutex_lock(&device->logo_lock);
+    if (device->usb_pid == USB_DEVICE_ID_RAZER_BLADE_PRO_EARLY_2020)
+        err = razer_send_logo_payload(device, &request, &response);
+    else
+        err = razer_send_payload(device, &request, &response);
+    mutex_unlock(&device->logo_lock);
     if (err)
         return err;
 
     return count;
+}
+
+static ssize_t razer_attr_write_logo_matrix_effect_common(struct device *dev, size_t count, unsigned char effect)
+{
+    struct razer_kbd_device *device = dev_get_drvdata(dev);
+    struct razer_report request = razer_chroma_standard_get_led_state(NOSTORE, LOGO_LED);
+    struct razer_report response = {0};
+    unsigned char state;
+    int err, restore_err;
+
+    mutex_lock(&device->logo_lock);
+    request.transaction_id.id = 0xFF;
+    err = razer_send_logo_payload(device, &request, &response);
+    if (err)
+        goto out;
+
+    state = response.arguments[2];
+    if (state > 1) {
+        err = -EIO;
+        goto out;
+    }
+
+    request = razer_chroma_standard_set_led_effect(NOSTORE, LOGO_LED, effect);
+    request.transaction_id.id = 0xFF;
+    err = razer_send_logo_payload(device, &request, &response);
+
+    // Selecting an effect enables the LED, so restore its active state even after an error.
+    request = razer_chroma_standard_set_led_state(NOSTORE, LOGO_LED, state);
+    request.transaction_id.id = 0xFF;
+    restore_err = razer_send_logo_payload(device, &request, &response);
+    if (!err)
+        err = restore_err;
+out:
+    mutex_unlock(&device->logo_lock);
+    if (err)
+        return err;
+
+    return count;
+}
+
+static ssize_t razer_attr_write_logo_matrix_effect_on(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+    return razer_attr_write_logo_matrix_effect_common(dev, count, CLASSIC_EFFECT_STATIC);
+}
+
+static ssize_t razer_attr_write_logo_matrix_effect_breath(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+    return razer_attr_write_logo_matrix_effect_common(dev, count, CLASSIC_EFFECT_BREATHING);
 }
 
 /**
@@ -4743,6 +4817,8 @@ static DEVICE_ATTR(game_led_state,          0660, razer_attr_read_game_led_state
 static DEVICE_ATTR(macro_led_state,         0660, razer_attr_read_macro_led_state,            razer_attr_write_macro_led_state);
 static DEVICE_ATTR(macro_led_effect,        0660, razer_attr_read_macro_led_effect,           razer_attr_write_macro_led_effect);
 static DEVICE_ATTR(logo_led_state,          0660, razer_attr_read_logo_led_state,             razer_attr_write_logo_led_state);
+static DEVICE_ATTR(logo_matrix_effect_on,   0220, NULL,                                      razer_attr_write_logo_matrix_effect_on);
+static DEVICE_ATTR(logo_matrix_effect_breath, 0220, NULL,                                    razer_attr_write_logo_matrix_effect_breath);
 static DEVICE_ATTR(profile_led_red,         0660, razer_attr_read_profile_led_red,            razer_attr_write_profile_led_red);
 static DEVICE_ATTR(profile_led_green,       0660, razer_attr_read_profile_led_green,          razer_attr_write_profile_led_green);
 static DEVICE_ATTR(profile_led_blue,        0660, razer_attr_read_profile_led_blue,           razer_attr_write_profile_led_blue);
@@ -5262,6 +5338,7 @@ static void razer_kbd_init(struct razer_kbd_device *dev, struct hid_device *hdev
 
     // Initialise mutex
     mutex_init(&dev->lock);
+    mutex_init(&dev->logo_lock);
     // Setup values
     dev->hdev = hdev;
     dev->usb_vid = usb_dev->descriptor.idVendor;
@@ -5754,6 +5831,8 @@ static int razer_kbd_probe(struct hid_device *hdev, const struct hid_device_id *
             CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_matrix_effect_custom);          // Custom effect
             CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_matrix_custom_frame);           // Set LED matrix
             CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_logo_led_state);                // Enable/Disable the logo
+            CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_logo_matrix_effect_on);
+            CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_logo_matrix_effect_breath);
             break;
 
         case USB_DEVICE_ID_RAZER_BLACKWIDOW_CHROMA:
@@ -6302,6 +6381,8 @@ static void razer_kbd_disconnect(struct hid_device *hdev)
             device_remove_file(&hdev->dev, &dev_attr_matrix_effect_custom);          // Custom effect
             device_remove_file(&hdev->dev, &dev_attr_matrix_custom_frame);           // Set LED matrix
             device_remove_file(&hdev->dev, &dev_attr_logo_led_state);                // Enable/Disable the logo
+            device_remove_file(&hdev->dev, &dev_attr_logo_matrix_effect_on);
+            device_remove_file(&hdev->dev, &dev_attr_logo_matrix_effect_breath);
             break;
 
         case USB_DEVICE_ID_RAZER_BLACKWIDOW_CHROMA:
