@@ -65,6 +65,13 @@ def set_logo_active(self, active):
     with open(driver_path, 'w') as driver_file:
         driver_file.write('1' if active else '0')
 
+    if active and 'set_logo_breath_mono' in self.METHODS and 'set_logo_on' in self.METHODS:
+        effect = {'on': 'on', 'breathMono': 'breath'}.get(self.zone["logo"]["effect"])
+        if effect is not None:
+            driver_path = self.get_driver_path('logo_matrix_effect_' + effect)
+            with open(driver_path, 'w') as driver_file:
+                driver_file.write('1')
+
 
 @endpoint('razer.device.lighting.logo', 'getLogoBrightness', out_sig='d')
 def get_logo_brightness(self):

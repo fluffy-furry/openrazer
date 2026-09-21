@@ -170,6 +170,7 @@ struct razer_blade_model;
 struct razer_kbd_device {
     struct hid_device *hdev;
     struct mutex lock;
+    struct mutex logo_lock;
     unsigned char usb_interface_protocol;
     unsigned short usb_vid;
     unsigned short usb_pid;

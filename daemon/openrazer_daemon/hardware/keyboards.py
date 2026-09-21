@@ -1823,7 +1823,8 @@ class RazerBladeProEarly2020(_RippleKeyboard):
     USB_PID = 0x0256
     HAS_MATRIX = True
     MATRIX_DIMS = [6, 16]
-    METHODS = ['get_device_type_keyboard', 'set_wave_effect', 'set_static_effect', 'set_spectrum_effect',
+    METHODS = ['get_device_type_keyboard', 'get_logo_active', 'set_logo_active',
+               'set_logo_on', 'set_logo_breath_mono', 'set_wave_effect', 'set_static_effect', 'set_spectrum_effect',
                'set_reactive_effect', 'set_none_effect', 'set_custom_effect', 'set_key_row',
                'set_ripple_effect', 'set_ripple_effect_random_colour',
                'get_fan_state', 'get_fan_rpm', 'get_fan_limits', 'set_fan_auto', 'set_fan_manual', 'get_fan_config', 'get_fan_status',
