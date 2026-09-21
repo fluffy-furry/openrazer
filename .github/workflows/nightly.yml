@@ -1,0 +1,160 @@
+name: Nightly build
+
+on:
+  push:
+    branches: [nightly]
+  pull_request:
+    branches: [nightly]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential dbus-x11 python3-daemonize python3-dbus \
+            python3-gi python3-numpy python3-pyudev python3-setproctitle python3-setuptools
+          sudo groupadd -f plugdev
+          sudo usermod -a -G plugdev "$USER"
+      - name: Check generated files
+        run: ./scripts/ci/test-auto-generate.sh
+      - name: Test Blade controls
+        run: |
+          for test in scripts/ci/test-blade-*.py; do
+            python3 "$test"
+          done
+      - name: Test daemon with default capabilities
+        run: sg plugdev -c 'bash scripts/ci/test-daemon-isolated.sh'
+      - name: Test daemon with experimental fan targets
+        run: |
+          bash scripts/generate_all_fake_drivers.sh -f --experimental-fan-targets
+          sg plugdev -c 'bash scripts/ci/test-daemon-isolated.sh'
+
+  driver:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential linux-headers-generic
+      - name: Set build version
+        id: version
+        run: python3 scripts/ci/set-nightly-version.py
+      - name: Compile and verify kernel modules
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          kernel_dirs=(/lib/modules/*/build)
+          kernel_dir=$(printf '%s\n' "${kernel_dirs[@]}" | sort -V | tail -n 1)
+          test -d "$kernel_dir"
+          make -j"$(nproc)" KERNELDIR="$kernel_dir" KCFLAGS='-Wall -Werror'
+          for module in razerkbd razermouse razerkraken razeraccessory; do
+            test "$(modinfo -F version "driver/$module.ko")" = "$VERSION"
+          done
+
+  packages:
+    needs: [test, driver]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      short_sha: ${{ steps.version.outputs.short_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential debhelper dh-python dkms python3-setuptools
+      - name: Set build version
+        id: version
+        run: python3 scripts/ci/set-nightly-version.py
+      - name: Build Debian packages
+        run: dpkg-buildpackage -us -uc -b
+      - name: Collect and verify packages
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir dist
+          for package in openrazer-meta openrazer-driver-dkms openrazer-daemon python3-openrazer; do
+            deb="../${package}_${VERSION}_all.deb"
+            test "$(dpkg-deb -f "$deb" Version)" = "$VERSION"
+            cp "$deb" dist/
+          done
+          extract=$(mktemp -d)
+          dpkg-deb -x "dist/openrazer-driver-dkms_${VERSION}_all.deb" "$extract"
+          test -f "$extract/usr/src/openrazer-driver-$VERSION/driver/razerblade_driver.c"
+          grep -Fx "PACKAGE_VERSION=\"$VERSION\"" "$extract/usr/src/openrazer-driver-$VERSION/dkms.conf"
+          dpkg-deb -x "dist/openrazer-daemon_${VERSION}_all.deb" "$extract"
+          dpkg-deb -x "dist/python3-openrazer_${VERSION}_all.deb" "$extract"
+          PYTHONPATH="$extract/usr/lib/python3/dist-packages" python3 - <<'PY'
+          from importlib.metadata import requires, version
+          import os
+
+          expected = os.environ['VERSION']
+          assert version('openrazer') == expected
+          assert version('openrazer-daemon') == expected
+          dependencies = [value.replace('_', '-').replace(' ', '') for value in requires('openrazer')]
+          assert f'openrazer-daemon=={expected}' in dependencies
+          PY
+          rm -rf "$extract"
+          cd dist
+          sha256sum *.deb > SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: openrazer-${{ steps.version.outputs.version }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    needs: packages
+    if: github.repository == 'fluffy-furry/openrazer' && github.ref == 'refs/heads/nightly' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    concurrency:
+      group: nightly-release-${{ github.sha }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: openrazer-${{ needs.packages.outputs.version }}
+          path: dist
+      - name: Publish commit prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.packages.outputs.version }}
+          SHORT_SHA: ${{ needs.packages.outputs.short_sha }}
+        run: |
+          cd dist
+          sha256sum --check SHA256SUMS
+          tag="nightly-$SHORT_SHA"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; preserving its assets."
+          else
+            gh release create "$tag" ./* --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title "Nightly $VERSION" --notes "Build $VERSION from commit $GITHUB_SHA."
+          fi

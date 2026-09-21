@@ -1,8 +1,9 @@
 #!/usr/bin/python3
 import openrazer.client
 import glob
+import os
 
-daemon_test_dir = "/tmp/daemon_test"
+daemon_test_dir = os.environ.get("OPENRAZER_TEST_DIR", "/tmp/daemon_test")
 devmgr = openrazer.client.DeviceManager()
 passed = True
 
