@@ -3632,6 +3632,27 @@ static ssize_t razer_attr_write_matrix_effect_breath(struct device *dev, struct 
     return count;
 }
 
+struct razer_blade_logo_config {
+    u16 usb_pid;
+    u8 storage;
+};
+
+static const struct razer_blade_logo_config blade_logo_configs[] = {
+    { USB_DEVICE_ID_RAZER_BLADE_PRO_EARLY_2020, NOSTORE },
+};
+
+static const struct razer_blade_logo_config *razer_get_blade_logo_config(struct razer_kbd_device *device)
+{
+    size_t i;
+
+    for (i = 0; i < ARRAY_SIZE(blade_logo_configs); i++) {
+        if (blade_logo_configs[i].usb_pid == device->usb_pid)
+            return &blade_logo_configs[i];
+    }
+
+    return NULL;
+}
+
 static int has_inverted_led_state(struct device *dev)
 {
     struct razer_kbd_device *device = dev_get_drvdata(dev);
@@ -3669,10 +3690,11 @@ static int razer_send_logo_payload(struct razer_kbd_device *device, struct razer
 static ssize_t razer_attr_read_logo_led_state(struct device *dev, struct device_attribute *attr, char *buf)
 {
     struct razer_kbd_device *device = dev_get_drvdata(dev);
+    const struct razer_blade_logo_config *config = razer_get_blade_logo_config(device);
     struct razer_report request = {0};
     struct razer_report response = {0};
     int state;
-    unsigned char storage = device->usb_pid == USB_DEVICE_ID_RAZER_BLADE_PRO_EARLY_2020 ? NOSTORE : VARSTORE;
+    unsigned char storage = config ? config->storage : VARSTORE;
     int err;
 
     request = razer_chroma_standard_get_led_effect(storage, LOGO_LED);
@@ -3685,7 +3707,7 @@ static ssize_t razer_attr_read_logo_led_state(struct device *dev, struct device_
     }
 
     mutex_lock(&device->logo_lock);
-    if (device->usb_pid == USB_DEVICE_ID_RAZER_BLADE_PRO_EARLY_2020)
+    if (config)
         err = razer_send_logo_payload(device, &request, &response);
     else
         err = razer_send_payload(device, &request, &response);
@@ -3708,10 +3730,11 @@ static ssize_t razer_attr_read_logo_led_state(struct device *dev, struct device_
 static ssize_t razer_attr_write_logo_led_state(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
     struct razer_kbd_device *device = dev_get_drvdata(dev);
+    const struct razer_blade_logo_config *config = razer_get_blade_logo_config(device);
     struct razer_report request = {0};
     struct razer_report response = {0};
     unsigned char state;
-    unsigned char storage = device->usb_pid == USB_DEVICE_ID_RAZER_BLADE_PRO_EARLY_2020 ? NOSTORE : VARSTORE;
+    unsigned char storage = config ? config->storage : VARSTORE;
     int err;
 
     err = kstrtou8(buf, 0, &state);
@@ -3732,7 +3755,7 @@ static ssize_t razer_attr_write_logo_led_state(struct device *dev, struct device
     }
 
     mutex_lock(&device->logo_lock);
-    if (device->usb_pid == USB_DEVICE_ID_RAZER_BLADE_PRO_EARLY_2020)
+    if (config)
         err = razer_send_logo_payload(device, &request, &response);
     else
         err = razer_send_payload(device, &request, &response);
@@ -3746,11 +3769,16 @@ static ssize_t razer_attr_write_logo_led_state(struct device *dev, struct device
 static ssize_t razer_attr_write_logo_matrix_effect_common(struct device *dev, size_t count, unsigned char effect)
 {
     struct razer_kbd_device *device = dev_get_drvdata(dev);
-    struct razer_report request = razer_chroma_standard_get_led_state(NOSTORE, LOGO_LED);
+    const struct razer_blade_logo_config *config = razer_get_blade_logo_config(device);
+    struct razer_report request;
     struct razer_report response = {0};
     unsigned char state;
     int err, restore_err;
 
+    if (!config)
+        return -EOPNOTSUPP;
+
+    request = razer_chroma_standard_get_led_state(config->storage, LOGO_LED);
     mutex_lock(&device->logo_lock);
     request.transaction_id.id = 0xFF;
     err = razer_send_logo_payload(device, &request, &response);
@@ -3763,12 +3791,12 @@ static ssize_t razer_attr_write_logo_matrix_effect_common(struct device *dev, si
         goto out;
     }
 
-    request = razer_chroma_standard_set_led_effect(NOSTORE, LOGO_LED, effect);
+    request = razer_chroma_standard_set_led_effect(config->storage, LOGO_LED, effect);
     request.transaction_id.id = 0xFF;
     err = razer_send_logo_payload(device, &request, &response);
 
     // Selecting an effect enables the LED, so restore its active state even after an error.
-    request = razer_chroma_standard_set_led_state(NOSTORE, LOGO_LED, state);
+    request = razer_chroma_standard_set_led_state(config->storage, LOGO_LED, state);
     request.transaction_id.id = 0xFF;
     restore_err = razer_send_logo_payload(device, &request, &response);
     if (!err)
