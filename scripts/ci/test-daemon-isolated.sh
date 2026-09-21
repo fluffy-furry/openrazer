@@ -22,6 +22,7 @@ cleanup() {
             wait "$pid" 2>/dev/null || true
         fi
     done
+    chmod -R u+w "$stage"
     rm -rf "$stage"
     exit "$result"
 }
