@@ -10,21 +10,32 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+
 jobs:
   test:
     runs-on: ubuntu-24.04
+    container: ubuntu:26.04
     timeout-minutes: 20
     steps:
+      - name: Install checkout dependencies
+        run: |
+          apt-get update
+          apt-get install -y git ca-certificates
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Install test dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential dbus-x11 python3-daemonize python3-dbus \
+          apt-get install -y build-essential dbus-x11 python3-daemonize python3-dbus \
             python3-gi python3-numpy python3-pyudev python3-setproctitle python3-setuptools
-          sudo groupadd -f plugdev
-          sudo usermod -a -G plugdev "$USER"
+          groupadd -f plugdev
+          useradd --create-home --groups plugdev openrazer-test
       - name: Check generated files
         run: ./scripts/ci/test-auto-generate.sh
       - name: Test Blade controls
@@ -33,28 +44,30 @@ jobs:
             python3 "$test"
           done
       - name: Test daemon with default capabilities
-        run: sg plugdev -c 'bash scripts/ci/test-daemon-isolated.sh'
+        run: |
+          chown -R openrazer-test:plugdev "$GITHUB_WORKSPACE"
+          runuser -u openrazer-test -- bash scripts/ci/test-daemon-isolated.sh
       - name: Test daemon with experimental fan targets
         run: |
-          bash scripts/generate_all_fake_drivers.sh -f --experimental-fan-targets
-          sg plugdev -c 'bash scripts/ci/test-daemon-isolated.sh'
+          runuser -u openrazer-test -- bash scripts/generate_all_fake_drivers.sh -f --experimental-fan-targets
+          runuser -u openrazer-test -- bash scripts/ci/test-daemon-isolated.sh
 
   driver:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, ubuntu-24.04]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
+    container: ubuntu:26.04
     timeout-minutes: 20
     steps:
+      - name: Install checkout dependencies
+        run: |
+          apt-get update
+          apt-get install -y git ca-certificates
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential linux-headers-generic
+          apt-get install -y build-essential kmod linux-headers-generic python3
       - name: Set build version
         id: version
         run: python3 scripts/ci/set-nightly-version.py
@@ -72,20 +85,24 @@ jobs:
 
   packages:
     needs: [test, driver]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    container: ubuntu:26.04
     timeout-minutes: 20
     outputs:
       version: ${{ steps.version.outputs.version }}
       short_sha: ${{ steps.version.outputs.short_sha }}
     steps:
+      - name: Install checkout dependencies
+        run: |
+          apt-get update
+          apt-get install -y git ca-certificates
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Install packaging dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential debhelper dh-python dkms python3-setuptools
+          apt-get install -y build-essential debhelper dh-python dh-dkms dkms python3-setuptools
       - name: Set build version
         id: version
         run: python3 scripts/ci/set-nightly-version.py
@@ -121,6 +138,7 @@ jobs:
           cd dist
           sha256sum *.deb > SHA256SUMS
       - uses: actions/upload-artifact@v7
+        if: ${{ !env.ACT }}
         with:
           name: openrazer-${{ steps.version.outputs.version }}
           path: dist/
