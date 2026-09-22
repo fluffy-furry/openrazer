@@ -27,6 +27,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y git ca-certificates
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -61,6 +62,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y git ca-certificates
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
@@ -96,6 +98,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y git ca-certificates
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
